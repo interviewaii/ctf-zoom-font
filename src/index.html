@@ -1,0 +1,271 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta http-equiv="content-security-policy" content="script-src 'self' 'unsafe-inline'" />
+    <title>Screen and Audio Capture</title>
+    <style>
+        :root {
+            /* Main Theme Colors */
+            --primary-color: #7fbcfb;
+            --secondary-color: #e0c3fc;
+            --accent-color: #7fbcfb;
+            --text-color: #f7f7fa;
+            --description-color: rgba(255, 255, 255, 0.7);
+            --label-color: rgba(255, 255, 255, 0.9);
+            --placeholder-color: rgba(255, 255, 255, 0.5);
+            --link-color: #7fbcfb;
+            --link-hover-color: #5fa8d3;
+
+            /* Background Elements */
+            --background-transparent: rgba(0, 0, 0, 0.3);
+            --main-content-background: rgba(0, 0, 0, 0.2);
+            --card-background: rgba(255, 255, 255, 0.04);
+            --input-background: rgba(0, 0, 0, 0.2);
+            --input-focus-background: rgba(0, 0, 0, 0.3);
+            --header-background: rgba(0, 0, 0, 0.4);
+            --preview-video-background: rgba(0, 0, 0, 0.4);
+
+            /* Border Elements */
+            --border-color: rgba(255, 255, 255, 0.15);
+            --card-border: rgba(255, 255, 255, 0.1);
+            --button-border: rgba(255, 255, 255, 0.18);
+            --preview-video-border: rgba(255, 255, 255, 0.18);
+            --focus-border-color: #7fbcfb;
+
+            /* Button Styles */
+            --button-background: rgba(255, 255, 255, 0.10);
+            --hover-background: rgba(255, 255, 255, 0.12);
+            --icon-button-color: #f7f7fa;
+            --key-background: rgba(255, 255, 255, 0.18);
+            --key-border: rgba(255, 255, 255, 0.15);
+
+            /* Gradient Buttons */
+            --start-button-background: linear-gradient(90deg, #7fbcfb 0%, #e0c3fc 100%);
+            --start-button-color: #23242a;
+            --start-button-border: #fff;
+            --start-button-hover-background: linear-gradient(90deg, #e0c3fc 0%, #7fbcfb 100%);
+            --start-button-hover-border: #7fbcfb;
+            --text-input-button-background: #7fbcfb;
+            --text-input-button-hover: #5fa8d3;
+
+            /* Scrollbar Styles */
+            --scrollbar-track: rgba(255, 255, 255, 0.08);
+            --scrollbar-thumb: rgba(255, 255, 255, 0.18);
+            --scrollbar-thumb-hover: rgba(255, 255, 255, 0.28);
+            --scrollbar-background: rgba(255, 255, 255, 0.08);
+
+            /* Focus Effects */
+            --focus-box-shadow: rgba(127, 188, 251, 0.18);
+
+            /* Option Elements */
+            --option-label-color: rgba(255, 255, 255, 0.9);
+            --screen-option-background: rgba(0, 0, 0, 0.10);
+            --screen-option-hover-background: rgba(0, 0, 0, 0.18);
+            --screen-option-selected-background: rgba(127, 188, 251, 0.18);
+            --screen-option-text: rgba(255, 255, 255, 0.8);
+            --header-actions-color: rgba(255, 255, 255, 0.7);
+
+            /* Alert Colors */
+            --danger-color: #ef4444;
+            --danger-background: rgba(239, 68, 68, 0.05);
+            --danger-border: rgba(239, 68, 68, 0.3);
+            --warning-color: #fbbf24;
+            --warning-background: rgba(251, 191, 36, 0.08);
+            --warning-border: rgba(251, 191, 36, 0.2);
+
+            /* Form control elements */
+            --select-arrow: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%23ffffff' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+
+            /* Layout Dimensions */
+            --header-padding: 14px 32px;
+            --header-font-size: 18px;
+            --header-gap: 18px;
+            --header-button-padding: 10px 24px;
+            --header-icon-padding: 10px;
+            --header-font-size-small: 15px;
+            --main-content-padding: 32px;
+            --main-content-margin-top: 18px;
+            --icon-size: 28px;
+            --border-radius: 18px;
+            --content-border-radius: 18px;
+            --response-font-size: 18px;
+        }
+
+        /* Light Mode Theme (glass, highly transparent like dark) */
+        :root[data-theme="light"] {
+            /* Main Theme Colors */
+            --primary-color: #2563eb;
+            --secondary-color: #7c3aed;
+            --accent-color: #2563eb;
+            --text-color: #1f2937;
+            --description-color: rgba(31, 41, 55, 0.7);
+            --label-color: rgba(31, 41, 55, 0.9);
+            --placeholder-color: rgba(31, 41, 55, 0.5);
+            --link-color: #2563eb;
+            --link-hover-color: #1d4ed8;
+
+            /* Background Elements (match dark's transparency levels) */
+            --background-transparent: rgba(255, 255, 255, 0.30);
+            --main-content-background: rgba(255, 255, 255, 0.20);
+            --card-background: rgba(255, 255, 255, 0.06);
+            --input-background: rgba(255, 255, 255, 0.12);
+            --input-focus-background: rgba(255, 255, 255, 0.18);
+            --header-background: rgba(255, 255, 255, 0.40);
+            --preview-video-background: rgba(255, 255, 255, 0.40);
+            --button-background: rgba(255, 255, 255, 0.10);
+            --button-hover-background: rgba(255, 255, 255, 0.12);
+            --screen-option-background: rgba(255, 255, 255, 0.10);
+            --screen-option-hover-background: rgba(255, 255, 255, 0.18);
+            --scrollbar-background: rgba(255, 255, 255, 0.08);
+
+            /* Border Elements with enhanced glass effect */
+            --border-color: rgba(31, 41, 55, 0.12);
+            --card-border: rgba(31, 41, 55, 0.10);
+            --button-border: rgba(31, 41, 55, 0.12);
+            --button-hover-border: rgba(31, 41, 55, 0.20);
+            --shadow-color: rgba(0, 0, 0, 0.06);
+
+            /* Additional glass effect properties */
+            --glass-blur: 12px;
+            --glass-saturation: 180%;
+            --glass-brightness: 1.15;
+
+            /* Form control elements */
+            --select-arrow: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%231f2937' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+            --button-border: rgba(31, 41, 55, 0.15);
+            --button-hover-border: rgba(31, 41, 55, 0.25);
+            --preview-video-border: rgba(31, 41, 55, 0.10);
+            --focus-border-color: #2563eb;
+            --shadow-color: rgba(0, 0, 0, 0.08);
+
+            /* Button Styles */
+            --button-background: rgba(255, 255, 255, 0.24);
+            --hover-background: rgba(255, 255, 255, 0.32);
+            --icon-button-color: #1f2937;
+            --key-background: rgba(255, 255, 255, 0.20);
+            --key-border: rgba(31, 41, 55, 0.24);
+
+            /* Gradient Buttons */
+            --start-button-background: linear-gradient(90deg, #2563eb 0%, #7c3aed 100%);
+            --start-button-color: #ffffff;
+            --start-button-border: #2563eb;
+            --start-button-hover-background: linear-gradient(90deg, #7c3aed 0%, #2563eb 100%);
+            --start-button-hover-border: #7c3aed;
+            --text-input-button-background: #2563eb;
+            --text-input-button-hover: #1d4ed8;
+
+            /* Scrollbar Styles */
+            --scrollbar-track: rgba(31, 41, 55, 0.06);
+            --scrollbar-thumb: rgba(31, 41, 55, 0.28);
+            --scrollbar-thumb-hover: rgba(31, 41, 55, 0.36);
+            --scrollbar-background: rgba(31, 41, 55, 0.06);
+
+            /* Focus Effects */
+            --focus-box-shadow: rgba(37, 99, 235, 0.18);
+
+            /* Option Elements */
+            --option-label-color: rgba(31, 41, 55, 0.9);
+            --screen-option-background: rgba(255, 255, 255, 0.16);
+            --screen-option-hover-background: rgba(255, 255, 255, 0.22);
+            --screen-option-selected-background: rgba(37, 99, 235, 0.15);
+            --screen-option-text: rgba(31, 41, 55, 0.8);
+            --header-actions-color: rgba(31, 41, 55, 0.7);
+
+            /* Alert Colors */
+            --danger-color: #dc2626;
+            --danger-background: rgba(220, 38, 38, 0.05);
+            --danger-border: rgba(220, 38, 38, 0.3);
+            --warning-color: #d97706;
+            --warning-background: rgba(217, 119, 6, 0.08);
+            --warning-border: rgba(217, 119, 6, 0.2);
+        }
+
+        /* Theme transition - only for specific properties to avoid performance issues */
+        :root,
+        :root * {
+            transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+        }
+
+        /* Exclude certain elements from transitions to prevent glitches */
+        .icon-button,
+        .listening-toggle,
+        .screen-share-toggle-btn,
+        button,
+        input,
+        textarea {
+            transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease, transform 0.2s ease;
+        }
+
+        /* Compact layout styles */
+        :root.compact-layout {
+            --header-padding: 6px 12px;
+            --header-font-size: 13px;
+            --header-gap: 6px;
+            --header-button-padding: 4px 8px;
+            --header-icon-padding: 4px;
+            --header-font-size-small: 10px;
+            --main-content-padding: 10px;
+            --main-content-margin-top: 2px;
+            --icon-size: 16px;
+            --border-radius: 4px;
+            --content-border-radius: 4px;
+        }
+
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+            background: transparent !important;
+            backdrop-filter: blur(8px) !important;
+            -webkit-backdrop-filter: blur(8px) !important;
+        }
+
+        body {
+            font-family:
+                'Inter',
+                -apple-system,
+                BlinkMacSystemFont,
+                sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        interview-ai-app {
+            display: block;
+            width: calc(100% - 100px);
+            height: 100%;
+            margin: 0 50px;
+            background: transparent !important;
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+        }
+
+        /* Stronger blur in light theme for better readability on bright backgrounds */
+        html[data-theme="light"] body {
+            backdrop-filter: blur(12px) !important;
+            -webkit-backdrop-filter: blur(12px) !important;
+        }
+
+        html[data-theme="light"] interview-ai-app {
+            backdrop-filter: blur(12px) !important;
+            -webkit-backdrop-filter: blur(12px) !important;
+        }
+    </style>
+</head>
+
+<body>
+    <script src="assets/marked-4.3.0.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/vs2015.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script type="module" src="components/app/InterviewCrackerApp.js"></script>
+
+    <interview-ai-app id="interview-ai"></interview-ai-app>
+    <script src="utils/renderer.js"></script>
+</body>
+
+</html>

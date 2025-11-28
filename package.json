@@ -1,0 +1,45 @@
+{
+  "name": "interview-ai",
+  "productName": "Interview AI",
+  "version": "0.4.0",
+  "description": "Interview AI — Your Smart AI Assistant for Interviews",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "electron-forge start",
+    "package": "electron-forge package",
+    "make": "electron-forge make",
+    "publish": "electron-forge publish",
+    "lint": "echo \"No linting configured\"",
+    "start:optimized": "cross-env NODE_ENV=production electron-forge start",
+    "monitor": "node -e \"const monitor = require('./src/utils/performance-monitor'); console.log('Performance monitoring enabled');\"",
+    "optimize": "node optimize-performance.js"
+  },
+  "keywords": [
+    "interview ai",
+    "ai assistant",
+    "interview helper",
+    "real-time ai assistant",
+    "Interview AI"
+  ],
+  "author": {
+    "name": "Tejas Bachute",
+    "email": "tejasbachute3@gmail.com"
+  },
+  "license": "GPL-3.0",
+  "dependencies": {
+    "@google/genai": "^1.2.0",
+    "electron-squirrel-startup": "^1.0.1"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.8.1",
+    "@electron-forge/maker-deb": "^7.8.1",
+    "@electron-forge/maker-dmg": "^7.8.1",
+    "@electron-forge/maker-rpm": "^7.8.1",
+    "@electron-forge/maker-squirrel": "^7.8.1",
+    "@electron-forge/maker-zip": "^7.8.1",
+    "@electron-forge/plugin-auto-unpack-natives": "^7.8.1",
+    "@electron-forge/plugin-fuses": "^7.8.1",
+    "@electron/fuses": "^1.8.0",
+    "electron": "30.0.0"
+  }
+}
