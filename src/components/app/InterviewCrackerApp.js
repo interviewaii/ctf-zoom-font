@@ -7,6 +7,9 @@ import { HistoryView } from '../views/HistoryView.js';
 import { AssistantView } from '../views/AssistantView.js';
 import { OnboardingView } from '../views/OnboardingView.js';
 import { AdvancedView } from '../views/AdvancedView.js';
+import { PaymentAlert } from '../views/PaymentAlert.js';
+import { isActivationValid, activateWithDeviceLock } from '../../utils/deviceId.js';
+import { isLicenseValid, activateLicense, canStartInterview, canGetResponse, trackInterviewStart, trackResponse, getLicenseInfo } from '../../utils/licenseManager.js';
 
 export class InterviewCrackerApp extends LitElement {
     static styles = css`
@@ -21,6 +24,11 @@ export class InterviewCrackerApp extends LitElement {
             padding: 0px;
             cursor: default;
             user-select: none;
+        }
+
+        input, textarea {
+            user-select: text !important;
+            cursor: text !important;
         }
 
         :host {
@@ -179,8 +187,12 @@ export class InterviewCrackerApp extends LitElement {
         layoutMode: { type: String },
         advancedMode: { type: Boolean },
         isDarkMode: { type: Boolean },
+        showPaymentAlert: { type: Boolean },
         _viewInstances: { type: Object, state: true },
         _isClickThrough: { state: true },
+        isStreaming: { type: Boolean, state: true },
+        responseFontSize: { type: Number },
+        uiZoomLevel: { type: Number },
     };
 
     constructor() {
@@ -204,6 +216,18 @@ export class InterviewCrackerApp extends LitElement {
         this.isListening = false;
         this._viewInstances = new Map();
         this._isClickThrough = false;
+        this.responseCount = parseInt(localStorage.getItem('responseCount') || '0');
+        this.isActivated = false; // Will be verified async
+        this.showPaymentAlert = false;
+        this.isStreaming = false;
+        this._inCodeBlock = false;
+
+        // Zoom controls
+        this.responseFontSize = parseInt(localStorage.getItem('responseFontSize') || '18');
+        this.uiZoomLevel = parseInt(localStorage.getItem('uiZoomLevel') || '100');
+
+        // Verify device-locked activation
+        this.verifyActivation();
 
         // Apply layout mode to document root
         this.updateLayoutMode();
@@ -215,6 +239,14 @@ export class InterviewCrackerApp extends LitElement {
         this.syncThemeState();
     }
 
+    async verifyActivation() {
+        // Check both old activation and new license system
+        const oldActivation = await isActivationValid();
+        const licenseValid = isLicenseValid();
+        this.isActivated = oldActivation || licenseValid;
+        this.requestUpdate();
+    }
+
     connectedCallback() {
         super.connectedCallback();
 
@@ -224,12 +256,66 @@ export class InterviewCrackerApp extends LitElement {
             ipcRenderer.on('update-response', (_, response) => {
                 this.setResponse(response);
             });
+            ipcRenderer.on('update-response-stream', (_, chunk) => {
+                this.handleResponseStream(chunk);
+            });
             ipcRenderer.on('update-status', (_, status) => {
                 this.setStatus(status);
             });
             ipcRenderer.on('click-through-toggled', (_, isEnabled) => {
                 this._isClickThrough = isEnabled;
             });
+
+
+            // Add global keyboard handler for window movement and zoom controls
+            this._keydownHandler = (e) => {
+                const isShift = e.shiftKey;
+                const isCtrl = e.ctrlKey || e.metaKey;
+
+                // Handle Shift+Arrow keys for window movement
+                if (isShift && !isCtrl && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.stopImmediatePropagation();
+
+                    const direction = e.key.replace('Arrow', '').toLowerCase();
+                    console.log('🚀 Moving window:', direction);
+                    ipcRenderer.send('move-window', direction);
+                    return false;
+                }
+
+                // Handle Shift+Plus/Minus for response font size
+                if (isShift && !isCtrl && (e.key === '+' || e.key === '=' || e.key === '-' || e.key === '_')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+
+                    const delta = (e.key === '-' || e.key === '_') ? -2 : 2;
+                    this.adjustResponseFontSize(delta);
+                    console.log('📝 Response font size:', this.responseFontSize + 'px');
+                    return false;
+                }
+
+                // Handle Ctrl+Plus/Minus for UI zoom
+                if (isCtrl && !isShift && (e.key === '+' || e.key === '=' || e.key === '-' || e.key === '_')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+
+                    const delta = (e.key === '-' || e.key === '_') ? -10 : 10;
+                    this.adjustUIZoom(delta);
+                    console.log('🔍 UI zoom level:', this.uiZoomLevel + '%');
+                    return false;
+                }
+
+                // Prevent Ctrl+0 (reset zoom)
+                if (isCtrl && e.key === '0') {
+                    e.preventDefault();
+                    return false;
+                }
+            };
+
+            // Attach to window to catch all events
+            window.addEventListener('keydown', this._keydownHandler, true);
+            console.log('✅ Global keyboard handler attached (Shift+Arrow, Shift+/-,  Ctrl+/-)');
         }
 
         // Add functions to window.desireAI for IPC callbacks
@@ -245,8 +331,15 @@ export class InterviewCrackerApp extends LitElement {
         if (window.require) {
             const { ipcRenderer } = window.require('electron');
             ipcRenderer.removeAllListeners('update-response');
+            ipcRenderer.removeAllListeners('update-response-stream');
             ipcRenderer.removeAllListeners('update-status');
             ipcRenderer.removeAllListeners('click-through-toggled');
+        }
+
+        // Remove keyboard event listener
+        if (this._keydownHandler) {
+            window.removeEventListener('keydown', this._keydownHandler, true);
+            console.log('🧹 Global keyboard handler removed');
         }
     }
 
@@ -278,15 +371,112 @@ export class InterviewCrackerApp extends LitElement {
         this.statusText = text;
     }
 
-    setResponse(response) {
-        this.responses.push(response);
+    adjustResponseFontSize(delta) {
+        const newSize = Math.max(12, Math.min(32, this.responseFontSize + delta));
+        if (newSize !== this.responseFontSize) {
+            this.responseFontSize = newSize;
+            localStorage.setItem('responseFontSize', newSize.toString());
+            this.requestUpdate();
+        }
+    }
 
-        // If user is viewing the latest response (or no responses yet), auto-navigate to new response
-        if (this.currentResponseIndex === this.responses.length - 2 || this.currentResponseIndex === -1) {
-            this.currentResponseIndex = this.responses.length - 1;
+    adjustUIZoom(delta) {
+        const newZoom = Math.max(50, Math.min(200, this.uiZoomLevel + delta));
+        if (newZoom !== this.uiZoomLevel) {
+            this.uiZoomLevel = newZoom;
+            localStorage.setItem('uiZoomLevel', newZoom.toString());
+            this.applyUIZoom();
+            this.requestUpdate();
+        }
+    }
+
+    applyUIZoom() {
+        const container = this.shadowRoot?.querySelector('.window-container');
+        if (container) {
+            container.style.transform = `scale(${this.uiZoomLevel / 100})`;
+            container.style.transformOrigin = 'top center';
+        }
+    }
+
+    setResponse(response) {
+        // If we were streaming, the last response is already this one (mostly)
+        // We replace it with the final version to ensure correctness
+        if (this.isStreaming && this.responses.length > 0) {
+            this.responses[this.responses.length - 1] = response;
+            this.isStreaming = false;
+            this._inCodeBlock = false;
+            this.responses = [...this.responses]; // Force update for child components
+        } else {
+            // Only check license limits if user is already activated
+            if (this.isActivated) {
+                const responseCheck = canGetResponse();
+                if (!responseCheck.allowed) {
+                    this.setStatus(responseCheck.reason);
+                    alert(`⚠️ Limit Reached\n\n${responseCheck.reason}\n\nPlease upgrade your plan or wait until tomorrow.`);
+                    return;
+                }
+            }
+
+            this.responses.push(response);
+
+            // Track response for license limits (only if activated)
+            if (this.isActivated) {
+                trackResponse();
+            }
+
+            // Increment response count and save to localStorage
+            this.responseCount++;
+            localStorage.setItem('responseCount', this.responseCount.toString());
+
+            // Check for payment alert if not activated
+            if (!this.isActivated && this.responseCount >= 300) {
+                // Show in-app payment alert
+                this.showPaymentAlert = true;
+            }
+
+            // If user is viewing the latest response (or no responses yet), auto-navigate to new response
+            if (this.currentResponseIndex === this.responses.length - 2 || this.currentResponseIndex === -1) {
+                this.currentResponseIndex = this.responses.length - 1;
+            }
         }
 
         // Hide loading indicator when response is received
+        if (window.setScreenshotProcessing) {
+            window.setScreenshotProcessing(false);
+        }
+
+        this.requestUpdate();
+    }
+
+    handleResponseStream(chunk) {
+        if (!this.isStreaming) {
+            // Start of a new streaming response
+            if (this.isActivated) {
+                const responseCheck = canGetResponse();
+                if (!responseCheck.allowed) return;
+            }
+
+            this.responses.push('');
+            this.isStreaming = true;
+            this._inCodeBlock = false;
+
+            if (this.isActivated) {
+                trackResponse();
+            }
+            this.responseCount++;
+            localStorage.setItem('responseCount', this.responseCount.toString());
+
+            if (this.currentResponseIndex === this.responses.length - 2 || this.currentResponseIndex === -1) {
+                this.currentResponseIndex = this.responses.length - 1;
+            }
+        }
+
+        // Append chunk immediately for maximum speed
+        this.responses[this.responses.length - 1] += chunk;
+
+        // Force update by replacing the array reference
+        this.responses = [...this.responses];
+
         if (window.setScreenshotProcessing) {
             window.setScreenshotProcessing(false);
         }
@@ -321,32 +511,20 @@ export class InterviewCrackerApp extends LitElement {
     }
 
     async handleUpgradeClick() {
-        // UPI deeplink for payment
-        const upiDeeplink = 'upi://pay?pa=9420700711@ybl&pn=interview-ai&am=10&tn=software%20buy&cu=INR';
+        // Redirect to Microsoft Store
+        const storeUrl = 'https://apps.microsoft.com/store/detail/interview-ai';
 
-        // Show payment confirmation dialog
-        const confirmed = confirm(
-            'Upgrade to InterviewAI Pro\n\n' +
-            '📱 UPI ID: 9420700711@ybl\n' +
-            '📝 Note: software buy\n\n' +
-            'Click OK to open UPI payment app\n' +
-            'Or pay manually and contact us for activation.'
-        );
-
-        if (confirmed) {
-            try {
-                if (window.require) {
-                    const { ipcRenderer } = window.require('electron');
-                    await ipcRenderer.invoke('open-external', upiDeeplink);
-                } else {
-                    // Fallback for web environment
-                    window.open(upiDeeplink, '_blank');
-                }
-            } catch (error) {
-                console.error('Failed to open UPI payment:', error);
-                // Fallback: show payment info
-                alert('UPI Payment\n\nUPI ID: 9420700711@ybl\nAmount: ₹10\nNote: software buy\n\nPlease pay using any UPI app and contact us for activation.');
+        try {
+            if (window.require) {
+                const { ipcRenderer } = window.require('electron');
+                await ipcRenderer.invoke('open-external', storeUrl);
+            } else {
+                // Fallback for web environment
+                window.open(storeUrl, '_blank');
             }
+        } catch (error) {
+            console.error('Failed to open store URL:', error);
+            alert(`Please visit the Microsoft Store to upgrade:\n${storeUrl}`);
         }
     }
 
@@ -421,11 +599,31 @@ export class InterviewCrackerApp extends LitElement {
 
     // Main view event handlers
     async handleStart() {
+        // Enforce license check - No free trial allowed
+        if (!this.isActivated) {
+            this.showPaymentAlert = true;
+            this.requestUpdate();
+            return;
+        }
+
+        // Check license limits
+        const interviewCheck = canStartInterview();
+        if (!interviewCheck.allowed) {
+            alert(interviewCheck.reason);
+            return;
+        }
+
         if (window.interviewAI) {
             await window.interviewAI.initializeGemini(this.selectedProfile, this.selectedLanguage);
             // Pass the screenshot interval as string (including 'manual' option)
             window.interviewAI.startCapture(this.selectedScreenshotInterval, this.selectedImageQuality);
         }
+
+        // Track interview start for license limits (only if activated)
+        if (this.isActivated) {
+            trackInterviewStart();
+        }
+
         this.responses = [];
         this.currentResponseIndex = -1;
         this.isListening = true;
@@ -494,6 +692,39 @@ export class InterviewCrackerApp extends LitElement {
         this.currentResponseIndex = e.detail.index;
     }
 
+    handleActivateLicenseClick() {
+        this.currentView = 'payment';
+        this.requestUpdate();
+    }
+
+    async handleChatClick() {
+        // Enforce license check
+        if (!this.isActivated) {
+            this.showPaymentAlert = true;
+            this.requestUpdate();
+            return;
+        }
+
+        // Initialize Gemini if needed
+        if (window.interviewAI) {
+            await window.interviewAI.initializeGemini(this.selectedProfile, this.selectedLanguage);
+        }
+
+        this.currentView = 'assistant';
+
+        // Add a welcome message if chat is empty
+        if (!this.responses || this.responses.length === 0) {
+            this.responses = [{
+                text: "Hello! I'm your AI assistant. How can I help you today?",
+                sender: 'ai',
+                timestamp: new Date().toLocaleTimeString()
+            }];
+            this.currentResponseIndex = 0;
+        }
+
+        this.requestUpdate();
+    }
+
     // Onboarding event handlers
     handleOnboardingComplete() {
         this.currentView = 'main';
@@ -557,6 +788,8 @@ export class InterviewCrackerApp extends LitElement {
                         .onStart=${() => this.handleStart()}
                         .onAPIKeyHelp=${() => this.handleAPIKeyHelp()}
                         .onLayoutModeChange=${layoutMode => this.handleLayoutModeChange(layoutMode)}
+                        .onActivateLicense=${() => this.handleActivateLicenseClick()}
+                        .onChat=${() => this.handleChatClick()}
                     ></main-view>
                 `;
 
@@ -593,9 +826,21 @@ export class InterviewCrackerApp extends LitElement {
                         .responses=${this.responses}
                         .currentResponseIndex=${this.currentResponseIndex}
                         .selectedProfile=${this.selectedProfile}
+                        .isStreaming=${this.isStreaming}
+                        .responseFontSize=${this.responseFontSize}
                         .onSendText=${message => this.handleSendText(message)}
                         @response-index-changed=${this.handleResponseIndexChanged}
+                        @navigate-to-main=${() => { this.currentView = 'main'; this.requestUpdate(); }}
                     ></assistant-view>
+                `;
+
+            case 'payment':
+                return html`
+                    <payment-alert
+                        .onClose=${() => this.handleBackClick()}
+                        .onActivate=${(code) => this.handleActivationSubmit(code)}
+                        .onPayNow=${() => this.handlePayNow()}
+                    ></payment-alert>
                 `;
 
             default:
@@ -634,8 +879,26 @@ export class InterviewCrackerApp extends LitElement {
                         <div class="view-container">${this.renderCurrentView()}</div>
                     </div>
                 </div>
+                ${this.showPaymentAlert ? html`
+                    <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 10000;">
+                        <payment-alert
+                            .onClose=${() => { this.showPaymentAlert = false; this.requestUpdate(); }}
+                            .onActivate=${(code) => this.handleActivationSubmit(code)}
+                            .onPayNow=${() => this.handlePayNow()}
+                        ></payment-alert>
+                    </div>
+                ` : ''}
             </div>
         `;
+    }
+
+    updated(changedProperties) {
+        super.updated(changedProperties);
+
+        // Apply UI zoom after render
+        if (changedProperties.has('uiZoomLevel')) {
+            this.applyUIZoom();
+        }
     }
 
     updateLayoutMode() {
@@ -730,6 +993,79 @@ export class InterviewCrackerApp extends LitElement {
             }
         }
 
+        this.requestUpdate();
+    }
+
+    handlePaymentAlertClose() {
+        this.showPaymentAlert = false;
+        this.requestUpdate();
+    }
+
+    async handleActivationSubmit(code) {
+        try {
+            // Try new license system first
+            const deviceId = await (async () => {
+                if (window.require) {
+                    const { ipcRenderer } = window.require('electron');
+                    return await ipcRenderer.invoke('get-machine-id');
+                }
+                return localStorage.getItem('deviceId') || 'browser-fallback';
+            })();
+
+            const licenseResult = await activateLicense(code, deviceId);
+            if (licenseResult.success) {
+                this.isActivated = true;
+                this.showPaymentAlert = false;
+
+                // Switch to chat view and show welcome message
+                this.currentView = 'assistant';
+                this.responses = [{
+                    text: "🎉 License activated successfully! How can I help you today?",
+                    sender: 'ai',
+                    timestamp: new Date().toLocaleTimeString()
+                }];
+                this.currentResponseIndex = 0;
+
+                // Initialize Gemini if needed
+                if (window.interviewAI) {
+                    await window.interviewAI.initializeGemini(this.selectedProfile, this.selectedLanguage);
+                }
+
+                this.requestUpdate();
+
+                // Show upgrade message if applicable
+                if (licenseResult.isUpgrade) {
+                    alert(`✓ License upgraded successfully!\n\nPrevious: ${licenseResult.previousTier}\nNew: ${licenseResult.tier}\n\nYour new plan is now active!`);
+                } else {
+                    alert(`✓ License activated successfully!\n\nPlan: ${licenseResult.tier}\nDevice ID: ${licenseResult.deviceId}`);
+                }
+                console.log('License activated:', licenseResult.tier);
+                return;
+            } else {
+                // Show error message in the payment alert
+                const paymentAlert = this.shadowRoot.querySelector('payment-alert');
+                if (paymentAlert) {
+                    paymentAlert.errorMessage = licenseResult.reason || 'Invalid activation code. Please try again.';
+                    paymentAlert.successMessage = '';
+                    paymentAlert.requestUpdate();
+                }
+            }
+
+            // Fallback to old activation system
+            const result = await activateWithDeviceLock(code);
+            if (result.success) {
+                this.isActivated = true;
+                this.showPaymentAlert = false;
+                this.requestUpdate();
+                console.log('Activated on device:', result.deviceId);
+            }
+        } catch (error) {
+            console.error('Activation failed:', error);
+        }
+    }
+
+    async handlePayNow() {
+        this.showPaymentAlert = true;
         this.requestUpdate();
     }
 }

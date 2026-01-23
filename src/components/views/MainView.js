@@ -1,5 +1,6 @@
 import { html, css, LitElement } from '../../assets/lit-core-2.7.4.min.js';
 import { resizeLayout } from '../../utils/windowResize.js';
+import { getDeviceIdForDisplay } from '../../utils/deviceId.js';
 
 export class MainView extends LitElement {
     static styles = css`
@@ -200,6 +201,45 @@ export class MainView extends LitElement {
             white-space: nowrap;
         }
 
+        .copy-button {
+            background: rgba(102, 126, 234, 0.2);
+            border: 1px solid rgba(102, 126, 234, 0.3);
+            color: #667eea;
+            padding: 4px 12px;
+            border-radius: 8px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: 8px;
+        }
+
+        .copy-button:hover {
+            background: rgba(102, 126, 234, 0.3);
+            border-color: rgba(102, 126, 234, 0.5);
+            transform: translateY(-1px);
+        }
+
+        .copy-button svg {
+            width: 12px;
+            height: 12px;
+        }
+
+        .copy-success {
+            color: #51cf66;
+            font-size: 11px;
+            margin-left: 8px;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
         :host {
             height: 100%;
             display: flex;
@@ -214,6 +254,10 @@ export class MainView extends LitElement {
         onAPIKeyHelp: { type: Function },
         isInitializing: { type: Boolean },
         onLayoutModeChange: { type: Function },
+        deviceId: { type: String },
+        onActivateLicense: { type: Function },
+        onChat: { type: Function },
+        copySuccess: { type: Boolean },
     };
 
     constructor() {
@@ -222,7 +266,17 @@ export class MainView extends LitElement {
         this.onAPIKeyHelp = () => { };
         this.isInitializing = false;
         this.onLayoutModeChange = () => { };
+        this.onActivateLicense = () => { };
+        this.onChat = () => { };
         this.boundKeydownHandler = this.handleKeydown.bind(this);
+        this.deviceId = '';
+        this.copySuccess = false;
+        this.loadDeviceId();
+    }
+
+    async loadDeviceId() {
+        this.deviceId = await getDeviceIdForDisplay();
+        this.requestUpdate();
     }
 
     connectedCallback() {
@@ -248,6 +302,13 @@ export class MainView extends LitElement {
     }
 
     handleKeydown(e) {
+        // Don't trigger if user is typing in an input or textarea
+        // Use composedPath to get the actual target inside Shadow DOM
+        const target = e.composedPath()[0];
+        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+            return;
+        }
+
         const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
         const isStartShortcut = isMac ? e.metaKey && e.key === 'Enter' : e.ctrlKey && e.key === 'Enter';
 
@@ -274,6 +335,28 @@ export class MainView extends LitElement {
         localStorage.removeItem('onboardingCompleted');
         // Refresh the page to trigger onboarding
         window.location.reload();
+    }
+
+    handleActivateLicense() {
+        this.onActivateLicense();
+    }
+
+    handleChatClick() {
+        this.onChat();
+    }
+
+    async handleCopyDeviceId() {
+        try {
+            await navigator.clipboard.writeText(this.deviceId);
+            this.copySuccess = true;
+            this.requestUpdate();
+            setTimeout(() => {
+                this.copySuccess = false;
+                this.requestUpdate();
+            }, 2000);
+        } catch (error) {
+            console.error('Failed to copy:', error);
+        }
     }
 
     loadLayoutMode() {
@@ -303,11 +386,33 @@ export class MainView extends LitElement {
                         ${this.getStartButtonText()}
                     </button>
                 </div>
+                <div class="input-group" style="margin-top: 8px; gap: 10px;">
+                    <button @click=${this.handleActivateLicense} class="start-button" style="font-size: 13px; padding: 8px 18px;">
+                        🔑 Activate License
+                    </button>
+                </div>
                 <p class="description">
                     ✨ Ready to start your AI assistant session<br>
                     <span style="font-size: 12px; opacity: 0.7; margin-top: 6px; display: block;">
                     Your intelligent companion for interviews and meetings
                     </span>
+                    ${this.deviceId ? html`
+                        <br>
+                        <span style="font-size: 13px; opacity: 0.9; margin-top: 12px; display: block; color: #667eea; font-weight: 600;">
+                        📱 Your Device ID: ${this.deviceId}
+                        <button class="copy-button" @click=${this.handleCopyDeviceId}>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                            </svg>
+                            Copy
+                        </button>
+                        ${this.copySuccess ? html`<span class="copy-success">✓ Copied!</span>` : ''}
+                        </span>
+                        <span style="font-size: 11px; opacity: 0.6; margin-top: 4px; display: block;">
+                        (Send this to get your license key)
+                        </span>
+                    ` : ''}
                 </p>
             </div>
         `;

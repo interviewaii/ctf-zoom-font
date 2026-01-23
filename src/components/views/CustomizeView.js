@@ -109,6 +109,8 @@ export class CustomizeView extends LitElement {
             transition: all 0.15s ease;
             min-height: 16px;
             font-weight: 400;
+            user-select: text;
+            -webkit-user-select: text;
         }
 
         .form-control:focus {
@@ -644,6 +646,7 @@ export class CustomizeView extends LitElement {
         advancedMode: { type: Boolean },
         onAdvancedModeChange: { type: Function },
         activeTab: { type: String },
+        resumeFileName: { type: String },
     };
 
     constructor() {
@@ -654,12 +657,12 @@ export class CustomizeView extends LitElement {
         this.selectedImageQuality = 'medium';
         this.layoutMode = 'normal';
         this.keybinds = this.getDefaultKeybinds();
-        this.onProfileChange = () => {};
-        this.onLanguageChange = () => {};
-        this.onScreenshotIntervalChange = () => {};
-        this.onImageQualityChange = () => {};
-        this.onLayoutModeChange = () => {};
-        this.onAdvancedModeChange = () => {};
+        this.onProfileChange = () => { };
+        this.onLanguageChange = () => { };
+        this.onScreenshotIntervalChange = () => { };
+        this.onImageQualityChange = () => { };
+        this.onLayoutModeChange = () => { };
+        this.onAdvancedModeChange = () => { };
 
         // Google Search default
         this.googleSearchEnabled = true;
@@ -679,6 +682,7 @@ export class CustomizeView extends LitElement {
         this.loadBackgroundTransparency();
         this.loadFontSize();
         this.activeTab = 'profile';
+        this.resumeFileName = localStorage.getItem('resumeFileName') || '';
     }
 
     connectedCallback() {
@@ -688,7 +692,7 @@ export class CustomizeView extends LitElement {
         // Resize window for this view
         resizeLayout();
     }
-    
+
     disconnectedCallback() {
         super.disconnectedCallback();
         // Restore original theme values when leaving the CustomizeView
@@ -722,34 +726,6 @@ export class CustomizeView extends LitElement {
                 description: 'Get help with programming questions and technical problems',
                 icon: '💻',
                 color: '#57f287'
-            },
-            {
-                value: 'sales',
-                name: 'Sales Call',
-                description: 'Assist with sales conversations and objection handling',
-                icon: '📞',
-                color: '#faa61a'
-            },
-            {
-                value: 'meeting',
-                name: 'Business Meeting',
-                description: 'Support for professional meetings and discussions',
-                icon: '🤝',
-                color: '#eb459e'
-            },
-            {
-                value: 'presentation',
-                name: 'Presentation',
-                description: 'Help with presentations and public speaking',
-                icon: '🎤',
-                color: '#ed4245'
-            },
-            {
-                value: 'negotiation',
-                name: 'Negotiation',
-                description: 'Guidance for business negotiations and deals',
-                icon: '⚖️',
-                color: '#9b59b6'
             },
         ];
     }
@@ -1102,7 +1078,7 @@ export class CustomizeView extends LitElement {
         // Apply transparency settings only while in the CustomizeView
         const root = document.documentElement;
         const isDarkMode = !root.hasAttribute('data-theme') || root.getAttribute('data-theme') !== 'light';
-        
+
         if (isDarkMode) {
             // Dark theme colors
             root.style.setProperty('--header-background', `rgba(0, 0, 0, ${this.backgroundTransparency})`);
@@ -1127,7 +1103,7 @@ export class CustomizeView extends LitElement {
             root.style.setProperty('--screen-option-background', `rgba(255, 255, 255, ${this.backgroundTransparency * 0.40})`);
             root.style.setProperty('--screen-option-hover-background', `rgba(255, 255, 255, ${this.backgroundTransparency * 0.55})`);
             root.style.setProperty('--scrollbar-background', `rgba(255, 255, 255, ${this.backgroundTransparency * 0.40})`);
-            
+
             // Add light theme specific variables with enhanced glass effect
             root.style.setProperty('--button-hover-background', `rgba(255, 255, 255, ${this.backgroundTransparency * 0.55})`);
             root.style.setProperty('--button-hover-border', `rgba(31, 41, 55, ${this.backgroundTransparency * 0.25})`);
@@ -1135,7 +1111,7 @@ export class CustomizeView extends LitElement {
             root.style.setProperty('--border-color', `rgba(31, 41, 55, ${this.backgroundTransparency * 0.15})`);
             root.style.setProperty('--card-border', `rgba(31, 41, 55, ${this.backgroundTransparency * 0.12})`);
             root.style.setProperty('--button-border', `rgba(31, 41, 55, ${this.backgroundTransparency * 0.15})`);
-            
+
             // Enhance backdrop filter for better glass effect
             document.body.style.backdropFilter = 'blur(12px)';
             document.body.style.webkitBackdropFilter = 'blur(12px)';
@@ -1164,6 +1140,63 @@ export class CustomizeView extends LitElement {
 
     setTab(tab) {
         this.activeTab = tab;
+    }
+
+    handlePaste(e) {
+        e.stopPropagation();
+        // Manual paste fallback
+        const text = (e.clipboardData || window.clipboardData).getData('text');
+        if (text) {
+            e.preventDefault(); // Prevent default to avoid double paste if it suddenly starts working
+            const input = e.target;
+            const start = input.selectionStart;
+            const end = input.selectionEnd;
+            const value = input.value;
+            input.value = value.substring(0, start) + text + value.substring(end);
+            input.selectionStart = input.selectionEnd = start + text.length;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+    }
+
+    handleKeyDown(e) {
+        // Allow copy/paste shortcuts
+        const isCmdOrCtrl = e.ctrlKey || e.metaKey;
+        const key = e.key.toLowerCase();
+        const isShortcut = isCmdOrCtrl && (key === 'c' || key === 'v' || key === 'x' || key === 'a');
+
+        if (isShortcut) {
+            e.stopPropagation();
+        }
+    }
+
+    async handleResumeUpload(e) {
+        const file = e.target.files[0];
+        if (file) {
+            this.resumeFileName = file.name;
+            localStorage.setItem('resumeFileName', file.name);
+
+            // Check file type
+            if (file.name.endsWith('.pdf') || file.name.endsWith('.doc') || file.name.endsWith('.docx')) {
+                // For binary files, we can't parse them easily.
+                // We'll clear the context and let the user paste it.
+                localStorage.setItem('resumeContext', '');
+                this.requestUpdate();
+                return;
+            }
+
+            try {
+                const text = await file.text();
+                localStorage.setItem('resumeContext', text);
+                this.requestUpdate();
+            } catch (error) {
+                console.error('Error reading file:', error);
+                alert('Failed to read file. Please ensure it is a valid text file.');
+            }
+        }
+    }
+
+    handleResumeContentInput(e) {
+        localStorage.setItem('resumeContext', e.target.value);
     }
 
     render() {
@@ -1207,9 +1240,43 @@ export class CustomizeView extends LitElement {
                                     </div>
                                 `)}
                             </div>
-                            <label class="form-label">Custom AI Instructions</label>
-                            <textarea class="form-control" placeholder="How should the AI behave? Be creative!" .value=${localStorage.getItem('customPrompt') || ''} rows="3" @input=${this.handleCustomPromptInput}></textarea>
-                            <div class="form-description">Personalize the AI's vibe for your interviews. 🎤</div>
+                            <div class="form-group">
+                                <label class="form-label">Custom AI Instructions</label>
+                                <textarea class="form-control" placeholder="How should the AI behave? Be creative!" .value=${localStorage.getItem('customPrompt') || ''} rows="3" @input=${this.handleCustomPromptInput} @keydown=${this.handleKeyDown} @paste=${this.handlePaste}></textarea>
+                                <div class="form-text">Example: "Act as a strict interviewer", "Be funny and casual"</div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Upload Resume (Context)</label>
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <label class="toggle-btn" style="cursor: pointer; display: inline-flex; align-items: center; gap: 6px; width: 100%; justify-content: center;">
+                                        <span>📄</span> Upload Resume (PDF, Word, TXT)
+                                        <input type="file" accept=".txt,.md,.json,.pdf,.doc,.docx" style="display: none" @change=${this.handleResumeUpload} />
+                                    </label>
+                                </div>
+                                ${this.resumeFileName ? html`
+                                    <div style="font-size: 12px; color: var(--accent-color); margin-top: 4px; text-align: center;">✓ ${this.resumeFileName}</div>
+                                    
+                                    ${(this.resumeFileName.endsWith('.pdf') || this.resumeFileName.endsWith('.doc') || this.resumeFileName.endsWith('.docx')) ? html`
+                                        <div style="font-size: 11px; color: #ffab00; margin-top: 8px; padding: 6px; background: rgba(255, 171, 0, 0.1); border-radius: 4px; border: 1px solid rgba(255, 171, 0, 0.2);">
+                                            ⚠️ <strong>Note:</strong> We can't read this file type automatically yet. Please copy and paste the text from your resume below so the AI can use it.
+                                        </div>
+                                    ` : ''}
+
+                                    <div style="margin-top: 10px;">
+                                        <label class="form-label">Resume Content</label>
+                                        <textarea 
+                                            class="form-control" 
+                                            placeholder="Paste your resume text here..." 
+                                            .value=${localStorage.getItem('resumeContext') || ''} 
+                                            rows="6" 
+                                            @input=${this.handleResumeContentInput} 
+                                            @keydown=${this.handleKeyDown} 
+                                            @paste=${this.handlePaste}
+                                        ></textarea>
+                                    </div>
+                                ` : ''}
+                                <div class="form-text">Upload your resume to give the AI context. Text files work best!</div>
+                            </div>
                         </div>
                     </div>
                 ` : ''}
@@ -1235,6 +1302,21 @@ export class CustomizeView extends LitElement {
                                 <button class="toggle-btn ${this.layoutMode === 'compact' ? 'active' : ''}" @click=${() => this.handleLayoutModeSelect({ target: { value: 'compact' } })}>Compact</button>
                             </div>
                             <div class="form-description">Switch up the UI for your style. ✨</div>
+                            
+                            <div style="margin-top: 16px;">
+                                <div class="slider-header">
+                                    <label class="form-label">Background Transparency</label>
+                                    <span class="slider-value">${Math.round(this.backgroundTransparency * 100)}%</span>
+                                </div>
+                                <div class="slider-container">
+                                    <input type="range" class="slider-input" min="0.1" max="1" step="0.05" .value=${this.backgroundTransparency} @input=${this.handleBackgroundTransparencyChange} />
+                                    <div class="slider-labels">
+                                        <span>Transparent</span>
+                                        <span>Solid Black</span>
+                                    </div>
+                                </div>
+                                <div class="form-description">Adjust the background opacity. 100% is solid black (in dark mode).</div>
+                            </div>
                         </div>
                     </div>
                 ` : ''}
@@ -1264,8 +1346,13 @@ export class CustomizeView extends LitElement {
                     <div class="settings-card">
                         <div class="card-title"><span>⚙️</span> Advanced</div>
                         <div class="card-content">
-                            <label class="form-label">Font Size</label>
-                            <input type="range" min="12" max="24" .value=${this.fontSize || 16} @input=${this.handleFontSizeChange} />
+                            <div class="slider-header">
+                                <label class="form-label">Font Size</label>
+                                <span class="slider-value">${this.fontSize}px</span>
+                            </div>
+                            <div class="slider-container">
+                                <input type="range" class="slider-input" min="10" max="32" step="1" .value=${this.fontSize || 20} @input=${this.handleFontSizeChange} />
+                            </div>
                             <div class="form-description">Make things bigger or smaller. Your call!</div>
                             <button class="clear-data-btn" @click=${() => { localStorage.clear(); location.reload(); }}>Clear All Data</button>
                             <div class="form-description">This will reset all your settings and data.</div>

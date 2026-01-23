@@ -81,4 +81,19 @@ function setupGeneralIpcHandlers() {
             return { success: false, error: error.message };
         }
     });
+
+    ipcMain.handle('get-machine-id', async () => {
+        try {
+            const { machineIdSync } = require('node-machine-id');
+            const machineId = machineIdSync();
+            return machineId;
+        } catch (error) {
+            console.error('Error getting machine ID:', error);
+            return null;
+        }
+    });
+    ipcMain.on('close-app', () => {
+        stopMacOSAudioCapture();
+        app.quit();
+    });
 }

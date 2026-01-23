@@ -8,8 +8,8 @@ let audioProcessor = null;
 let micAudioProcessor = null;
 let audioBuffer = [];
 const SAMPLE_RATE = 24000;
-const AUDIO_CHUNK_DURATION = 0.025; // seconds - maximum speed for fastest response
-const BUFFER_SIZE = 2048; // Reduced buffer size for lower latency (~85ms)
+const AUDIO_CHUNK_DURATION = 0.02; // seconds - extreme speed
+const BUFFER_SIZE = 1024; // Minimal buffer size for lowest possible latency (~42ms)
 
 let hiddenVideo = null;
 let offscreenCanvas = null;
@@ -139,9 +139,8 @@ function arrayBufferToBase64(buffer) {
 }
 
 async function initializeGemini(profile = 'interview', language = 'en-US') {
-    // Hardcoded Google Gemini API key
-    const apiKey = 'AIzaSyAROFVeb0T-PcWQVBTqD7xxLTsM5ChPseE';
-    const success = await ipcRenderer.invoke('initialize-gemini', apiKey, localStorage.getItem('customPrompt') || '', profile, language);
+    // Pass profile and language first, then customPrompt, and null for apiKey to use rotation
+    const success = await ipcRenderer.invoke('initialize-gemini', profile, language, localStorage.getItem('customPrompt') || '', null);
     if (success) {
         interviewCrackerElement().setStatus('Live');
     } else {
@@ -374,74 +373,39 @@ async function captureScreenshot(imageQuality = 'medium', isManual = false) {
 
     offscreenContext.drawImage(hiddenVideo, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
 
-    // Check if image was drawn properly by sampling a pixel
-    const imageData = offscreenContext.getImageData(0, 0, 1, 1);
-    const isBlank = imageData.data.every((value, index) => {
-        // Check if all pixels are black (0,0,0) or transparent
-        return index === 3 ? true : value === 0;
-    });
-
-    if (isBlank) {
-        console.warn('Screenshot appears to be blank/black');
-    }
+    // Optimization: Skip blank check (getImageData is slow GPU sync)
 
     let qualityValue;
     switch (imageQuality) {
-        case 'high':
-            qualityValue = 0.9;
-            break;
-        case 'medium':
-            qualityValue = 0.7;
-            break;
-        case 'low':
-            qualityValue = 0.5;
-            break;
-        default:
-            qualityValue = 0.7; // Default to medium
+        case 'high': qualityValue = 0.9; break;
+        case 'medium': qualityValue = 0.7; break;
+        case 'low': qualityValue = 0.5; break;
+        default: qualityValue = 0.7;
     }
 
-    offscreenCanvas.toBlob(
-        async blob => {
-            if (!blob) {
-                console.error('Failed to create blob from canvas');
-                return;
-            }
+    // Faster synchronous encoding
+    const base64data = offscreenCanvas.toDataURL('image/jpeg', qualityValue).split(',')[1];
 
-            const reader = new FileReader();
-            reader.onloadend = async () => {
-                const base64data = reader.result.split(',')[1];
+    if (!base64data || base64data.length < 100) {
+        console.error('Invalid image data generated');
+        return;
+    }
 
-                // Validate base64 data
-                if (!base64data || base64data.length < 100) {
-                    console.error('Invalid base64 data generated');
-                    return;
-                }
+    // Skip if image hasn't changed
+    if (!isManual && window.lastSentImage === base64data) return;
+    window.lastSentImage = base64data;
 
-                // Optimization: Skip if image hasn't changed
-                if (!isManual && window.lastSentImage === base64data) {
-                    // console.log('Skipping duplicate frame');
-                    return;
-                }
-                window.lastSentImage = base64data;
+    const result = await ipcRenderer.invoke('send-image-content', {
+        data: base64data,
+    });
 
-                const result = await ipcRenderer.invoke('send-image-content', {
-                    data: base64data,
-                });
-
-                if (result.success) {
-                    // Track image tokens after successful send
-                    const imageTokens = tokenTracker.calculateImageTokens(offscreenCanvas.width, offscreenCanvas.height);
-                    tokenTracker.addTokens(imageTokens, 'image');
-                    console.log(`📊 Image sent successfully - ${imageTokens} tokens used (${offscreenCanvas.width}x${offscreenCanvas.height})`);
-                } else {
-                    console.error('Failed to send image:', result.error);
-                }
-            };
-            reader.readAsDataURL(blob);
-        },
-        'image/jpeg',
-        qualityValue
-    );
+    if (result.success) {
+        // Track tokens silently
+        const imageTokens = tokenTracker.calculateImageTokens(offscreenCanvas.width, offscreenCanvas.height);
+        tokenTracker.addTokens(imageTokens, 'image');
+    } else {
+        console.error('Failed to send image:', result.error);
+    }
 }
 
 async function captureManualScreenshot(imageQuality = null) {
@@ -467,45 +431,13 @@ async function captureManualScreenshot(imageQuality = null) {
 
     // Removed artificial delay for instant response
     try {
-        await sendTextMessage(`Analyze this screenshot and identify any questions or problems that need to be solved. Provide a comprehensive answer following these guidelines:
+        await sendTextMessage(`Analyze this screenshot and identify any questions or problems. Provide a direct, concise answer immediately.
+        
+**For Code:** Provide ONLY the working code and a 1-sentence explanation.
+**For MCQ:** Provide ONLY the correct option and a 1-sentence reason.
+**For Text:** Provide a direct, concise answer.
 
-**For Code Questions:**
-- First, identify the programming language and problem type
-- Provide a clear step-by-step approach in bullet points
-- Give the complete, working code solution
-- Include any important notes about edge cases or optimizations
-- If there are multiple approaches, mention the best one first
-
-**For Multiple Choice Questions (MCQ):**
-- Identify all the options clearly
-- Provide the correct answer with explanation
-- Explain why other options are incorrect (if applicable)
-- Include any relevant concepts or formulas needed
-
-**For Text/Theory Questions:**
-- Provide a complete, detailed answer
-- Include relevant examples or explanations
-- Mention any important concepts or definitions
-- If it's a step-by-step process, break it down clearly
-
-**For Math/Science Problems:**
-- Show the complete solution with steps
-- Include any formulas used
-- Provide the final answer clearly
-- Explain the reasoning behind each step
-
-**For Website/UI Questions:**
-- Identify the specific element or feature being asked about
-- Provide the complete answer or solution
-- Include any relevant technical details
-
-**Response Format:**
-- Start with "**Question Detected:**" followed by the identified question
-- Then provide your comprehensive answer
-- Use clear formatting with bullet points and sections
-- Be direct and complete - no unnecessary explanations
-
-Give me the answer immediately without any preamble.`);
+No preamble, no "Question Detected", no conversational filler. Just the answer.`);
     } catch (error) {
         console.error('Error sending screenshot analysis message:', error);
         // Hide loading indicator on error

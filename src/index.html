@@ -256,6 +256,8 @@
             -webkit-backdrop-filter: blur(12px) !important;
         }
     </style>
+    <!-- Razorpay Checkout Script -->
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
 </head>
 
 <body>
@@ -266,6 +268,58 @@
 
     <interview-ai-app id="interview-ai"></interview-ai-app>
     <script src="utils/renderer.js"></script>
+
+    <script>
+        const { ipcRenderer } = require('electron');
+
+        console.log('🎮 Keyboard handler script loaded');
+
+        // Function to handle window movement
+        function handleWindowMovement(e) {
+            const isCtrl = e.ctrlKey || e.metaKey;
+
+            console.log('Key pressed:', e.key, 'Ctrl:', isCtrl);
+
+            // Handle Ctrl+Arrow keys for window movement via IPC
+            if (isCtrl && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+
+                // Send IPC message to move window
+                const direction = e.key.replace('Arrow', '').toLowerCase();
+                console.log('🚀 Moving window:', direction);
+                ipcRenderer.send('move-window', direction);
+                return false;
+            }
+
+            // Prevent Ctrl+Plus/Minus/0 (zoom controls)
+            if (isCtrl && ['+', '-', '=', '_', '0'].includes(e.key)) {
+                e.preventDefault();
+                e.stopPropagation();
+                console.log('🚫 Prevented zoom shortcut:', e.key);
+                return false;
+            }
+        }
+
+        // Attach to multiple targets to ensure we catch the events
+        document.addEventListener('keydown', handleWindowMovement, true);
+        window.addEventListener('keydown', handleWindowMovement, true);
+
+        // Also attach after DOM is ready
+        document.addEventListener('DOMContentLoaded', function () {
+            console.log('✅ DOM loaded, attaching additional listeners');
+            document.body.addEventListener('keydown', handleWindowMovement, true);
+        });
+
+        // Prevent zoom via mouse wheel + Ctrl
+        document.addEventListener('wheel', function (e) {
+            if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+                return false;
+            }
+        }, { passive: false });
+    </script>
 </body>
 
 </html>

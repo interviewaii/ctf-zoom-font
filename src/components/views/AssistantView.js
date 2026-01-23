@@ -27,16 +27,18 @@ export class AssistantView extends LitElement {
             overflow-y: auto;
             border-radius: var(--border-radius);
             font-size: var(--response-font-size);
-            line-height: 1.6;
+            line-height: 1.8;
             background: linear-gradient(135deg, var(--card-background) 0%, var(--background-transparent) 100%);
             padding: 20px;
             scroll-behavior: smooth;
             border: 1px solid var(--card-border);
             backdrop-filter: blur(10px);
             box-shadow: inset 0 1px 0 var(--card-border);
-            position: relative;
-            animation: fadeInScale 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            animation: none;
             transition: max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            word-spacing: 0.2em;
+            letter-spacing: 0.02em;
+            white-space: normal;
         }
 
         @keyframes fadeInScale {
@@ -81,7 +83,6 @@ export class AssistantView extends LitElement {
             font-weight: 600;
             position: relative;
             padding-left: 12px;
-            animation: slideInLeft 0.5s ease-out;
         }
 
         .response-container h1::before,
@@ -103,7 +104,7 @@ export class AssistantView extends LitElement {
         @keyframes slideInLeft {
             from {
                 opacity: 0;
-                transform: translateX(-20px);
+                transform: translateX(-10px);
             }
             to {
                 opacity: 1;
@@ -133,20 +134,18 @@ export class AssistantView extends LitElement {
         .response-container p {
             margin: 0.8em 0;
             color: var(--text-color);
-            animation: fadeInUp 0.6s ease-out;
-            animation-fill-mode: both;
         }
 
-        .response-container p:nth-child(1) { animation-delay: 0.1s; }
-        .response-container p:nth-child(2) { animation-delay: 0.2s; }
-        .response-container p:nth-child(3) { animation-delay: 0.3s; }
-        .response-container p:nth-child(4) { animation-delay: 0.4s; }
-        .response-container p:nth-child(5) { animation-delay: 0.5s; }
+        .response-container p:nth-child(1) { animation-delay: 0s; }
+        .response-container p:nth-child(2) { animation-delay: 0s; }
+        .response-container p:nth-child(3) { animation-delay: 0s; }
+        .response-container p:nth-child(4) { animation-delay: 0s; }
+        .response-container p:nth-child(5) { animation-delay: 0s; }
 
         @keyframes fadeInUp {
             from {
                 opacity: 0;
-                transform: translateY(15px);
+                transform: translateY(5px);
             }
             to {
                 opacity: 1;
@@ -163,8 +162,6 @@ export class AssistantView extends LitElement {
 
         .response-container li {
             margin: 0.4em 0;
-            animation: slideInLeft 0.5s ease-out;
-            animation-fill-mode: both;
             padding-left: 8px;
             position: relative;
         }
@@ -184,11 +181,11 @@ export class AssistantView extends LitElement {
             100% { transform: scale(1); }
         }
 
-        .response-container li:nth-child(1) { animation-delay: 0.1s; }
-        .response-container li:nth-child(2) { animation-delay: 0.2s; }
-        .response-container li:nth-child(3) { animation-delay: 0.3s; }
-        .response-container li:nth-child(4) { animation-delay: 0.4s; }
-        .response-container li:nth-child(5) { animation-delay: 0.5s; }
+        .response-container li:nth-child(1) { animation-delay: 0s; }
+        .response-container li:nth-child(2) { animation-delay: 0s; }
+        .response-container li:nth-child(3) { animation-delay: 0s; }
+        .response-container li:nth-child(4) { animation-delay: 0s; }
+        .response-container li:nth-child(5) { animation-delay: 0s; }
 
         .response-container blockquote {
             margin: 1em 0;
@@ -693,6 +690,8 @@ export class AssistantView extends LitElement {
             backdrop-filter: blur(8px);
             -webkit-backdrop-filter: blur(8px);
             letter-spacing: 0.2px;
+            user-select: text;
+            -webkit-user-select: text;
         }
         #textInput:focus {
             border: 1.5px solid var(--focus-border-color);
@@ -779,6 +778,22 @@ export class AssistantView extends LitElement {
             backdrop-filter: blur(10px);
             font-weight: 500;
         }
+
+        /* Typing cursor effect */
+        .typing-cursor {
+            display: inline-block;
+            width: 8px;
+            height: 18px;
+            background-color: var(--accent-color);
+            margin-left: 4px;
+            vertical-align: middle;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0; }
+        }
     `;
 
     static properties = {
@@ -787,15 +802,45 @@ export class AssistantView extends LitElement {
         selectedProfile: { type: String },
         onSendText: { type: Function },
         isProcessingScreenshot: { type: Boolean },
+        isStreaming: { type: Boolean },
+        responseFontSize: { type: Number },
     };
 
     constructor() {
         super();
         this.responses = [];
         this.currentResponseIndex = -1;
-        this.selectedProfile = 'interview';
-        this.onSendText = () => {};
+        this.selectedProfile = localStorage.getItem('selectedProfile') || 'interview';
+        this.onSendText = () => { };
         this.isProcessingScreenshot = false;
+        this._updateQueued = false;
+    }
+
+    handleBack() {
+        this.dispatchEvent(new CustomEvent('navigate-to-main'));
+    }
+
+    handleDelete() {
+        if (confirm('Are you sure you want to clear the conversation history?')) {
+            this.responses = [];
+            this.currentResponseIndex = -1;
+            this.requestUpdate();
+            this.updateResponseContent();
+            // Also notify main process to clear session if needed
+            if (window.require) {
+                const { ipcRenderer } = window.require('electron');
+                ipcRenderer.invoke('start-new-session');
+            }
+        }
+    }
+
+    handleClose() {
+        if (window.require) {
+            const { ipcRenderer } = window.require('electron');
+            ipcRenderer.send('close-app');
+        } else {
+            window.close();
+        }
     }
 
     getProfileNames() {
@@ -826,10 +871,10 @@ export class AssistantView extends LitElement {
                     sanitize: true, // Never trust AI responses for HTML!
                 });
                 let rendered = window.marked.parse(content);
-                
+
                 // Add copy buttons to code blocks
                 rendered = this.addCopyButtonsToCodeBlocks(rendered);
-                
+
                 console.log('Markdown rendered successfully');
                 return rendered;
             } catch (error) {
@@ -852,7 +897,7 @@ export class AssistantView extends LitElement {
                     .replace(/&amp;/g, '&')
                     .replace(/&quot;/g, '"')
                     .replace(/&#39;/g, "'");
-                
+
                 // Apply syntax highlighting if highlight.js is available
                 let highlightedCode = codeContent;
                 if (window.hljs) {
@@ -869,7 +914,7 @@ export class AssistantView extends LitElement {
                         highlightedCode = codeContent;
                     }
                 }
-                
+
                 return `<pre><code class="hljs">${highlightedCode}</code><button class="copy-button" onclick="copyCode(this, \`${cleanCode.replace(/`/g, '\\`')}\`)">Copy</button></pre>`;
             }
         );
@@ -954,6 +999,34 @@ export class AssistantView extends LitElement {
         }
     }
 
+    increaseFontSize() {
+        const currentSize = parseInt(localStorage.getItem('fontSize') || '20', 10);
+        const newSize = Math.min(currentSize + 2, 40);
+        console.log('Increasing font size to:', newSize);
+        localStorage.setItem('fontSize', newSize.toString());
+        this.applyFontSize(newSize);
+        this.requestUpdate();
+    }
+
+    decreaseFontSize() {
+        const currentSize = parseInt(localStorage.getItem('fontSize') || '20', 10);
+        const newSize = Math.max(currentSize - 2, 12);
+        console.log('Decreasing font size to:', newSize);
+        localStorage.setItem('fontSize', newSize.toString());
+        this.applyFontSize(newSize);
+        this.requestUpdate();
+    }
+
+    applyFontSize(size) {
+        const fontSize = size || this.responseFontSize || 18;
+        const container = this.shadowRoot?.querySelector('.main-flex-container');
+        if (container) {
+            container.style.setProperty('--response-font-size', `${fontSize}px`);
+        }
+        // Also set on document for global fallback
+        document.documentElement.style.setProperty('--response-font-size', `${fontSize}px`);
+    }
+
     connectedCallback() {
         super.connectedCallback();
 
@@ -966,7 +1039,7 @@ export class AssistantView extends LitElement {
                 const originalText = button.textContent;
                 button.textContent = 'Copied!';
                 button.classList.add('copied');
-                
+
                 setTimeout(() => {
                     button.textContent = originalText;
                     button.classList.remove('copied');
@@ -980,11 +1053,11 @@ export class AssistantView extends LitElement {
                 textArea.select();
                 document.execCommand('copy');
                 document.body.removeChild(textArea);
-                
+
                 const originalText = button.textContent;
                 button.textContent = 'Copied!';
                 button.classList.add('copied');
-                
+
                 setTimeout(() => {
                     button.textContent = originalText;
                     button.classList.remove('copied');
@@ -1083,30 +1156,128 @@ export class AssistantView extends LitElement {
     updated(changedProperties) {
         super.updated(changedProperties);
         if (changedProperties.has('responses') || changedProperties.has('currentResponseIndex')) {
-            this.updateResponseContent();
+            this.queueUpdateResponseContent();
         }
+        if (changedProperties.has('responseFontSize')) {
+            this.applyFontSize(this.responseFontSize);
+        }
+    }
+
+    queueUpdateResponseContent() {
+        if (this._updateQueued) return;
+        this._updateQueued = true;
+        requestAnimationFrame(() => {
+            this.updateResponseContent();
+            this._updateQueued = false;
+        });
     }
 
     updateResponseContent() {
-        console.log('updateResponseContent called');
         const container = this.shadowRoot.querySelector('#responseContainer');
-        if (container) {
-            const currentResponse = this.getCurrentResponse();
-            console.log('Current response:', currentResponse);
-            const renderedResponse = this.renderMarkdown(currentResponse);
-            console.log('Rendered response:', renderedResponse);
-            container.innerHTML = renderedResponse;
-        } else {
-            console.log('Response container not found');
+        if (!container) return;
+
+        // Ensure font size is applied to the container
+        const fontSize = localStorage.getItem('fontSize') || '20';
+        this.applyFontSize(parseInt(fontSize, 10));
+
+        if (this.responses.length === 0) {
+            container.innerHTML = this.renderMarkdown(`Hello! How can I help you today?`);
+            return;
+        }
+
+        // Optimization: If we already have response items, just update the last one if needed
+        const responseItems = container.querySelectorAll('.response-item');
+        if (responseItems.length === this.responses.length) {
+            const lastIndex = this.responses.length - 1;
+            const lastItem = responseItems[lastIndex];
+            let newContent = this.renderMarkdown(this.responses[lastIndex]);
+
+            // Add typing cursor if we are currently streaming the last response
+            if (this.isStreaming && lastIndex === this.responses.length - 1) {
+                newContent += '<span class="typing-cursor"></span>';
+            }
+
+            // Only update if content actually changed to avoid unnecessary DOM ops
+            if (lastItem.innerHTML !== newContent) {
+                lastItem.innerHTML = newContent;
+
+                // Scroll to bottom after update
+                container.scrollTop = container.scrollHeight;
+            }
+            return;
+        }
+
+        // Full render if lengths don't match (new response added or initial load)
+        const renderedResponses = this.responses.map((response, index) => {
+            let content = this.renderMarkdown(response);
+            if (this.isStreaming && index === this.responses.length - 1) {
+                content += '<span class="typing-cursor"></span>';
+            }
+            return `
+                <div class="response-item" data-index="${index}">
+                    ${content}
+                </div>
+                ${index < this.responses.length - 1 ? '<hr class="response-separator"/>' : ''}
+            `;
+        }).join('');
+
+        container.innerHTML = renderedResponses;
+
+        // Scroll to bottom after update
+        setTimeout(() => {
+            container.scrollTop = container.scrollHeight;
+        }, 0);
+    }
+
+    handlePaste(e) {
+        e.stopPropagation();
+        // Manual paste fallback
+        const text = (e.clipboardData || window.clipboardData).getData('text');
+        if (text) {
+            e.preventDefault(); // Prevent default to avoid double paste if it suddenly starts working
+            const input = e.target;
+            const start = input.selectionStart;
+            const end = input.selectionEnd;
+            const value = input.value;
+            input.value = value.substring(0, start) + text + value.substring(end);
+            input.selectionStart = input.selectionEnd = start + text.length;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
         }
     }
 
+    handleKeyDown(e) {
+        // Allow copy/paste shortcuts
+        const isCmdOrCtrl = e.ctrlKey || e.metaKey;
+        const key = e.key.toLowerCase();
+        const isShortcut = isCmdOrCtrl && (key === 'c' || key === 'v' || key === 'x' || key === 'a');
+
+        if (isShortcut) {
+            e.stopPropagation();
+        }
+        this.handleTextKeydown(e);
+    }
+
     render() {
-        const currentResponse = this.getCurrentResponse();
         const responseCounter = this.getResponseCounter();
 
         return html`
             <div class="main-flex-container">
+                <div class="top-toolbar" style="display: flex; justify-content: space-between; padding: 10px; background: var(--card-background); border-bottom: 1px solid var(--card-border); border-radius: 12px 12px 0 0;">
+                    <div style="display: flex; gap: 10px;">
+                        <button class="nav-button" @click=${this.handleBack} title="Back to Main" style="width: 32px; height: 32px;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                        </button>
+                        <button class="nav-button" @click=${this.handleDelete} title="Clear History" style="width: 32px; height: 32px;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                        </button>
+                    </div>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <span style="font-size: 12px; font-weight: 600; opacity: 0.7;">${this.getProfileNames()[this.selectedProfile]}</span>
+                        <button class="nav-button" @click=${this.handleClose} title="Close Application" style="width: 32px; height: 32px; border-color: rgba(239, 68, 68, 0.4); color: #ef4444;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                        </button>
+                    </div>
+                </div>
                 <div class="response-container" id="responseContainer">
                     ${this.isProcessingScreenshot ? html`
                         <div class="loading-indicator">
@@ -1117,21 +1288,20 @@ export class AssistantView extends LitElement {
                 </div>
                 <div class="shortcut-hint">Press the analyze shortcut to capture the screen</div>
                 <div class="text-input-container">
-                    <button class="nav-button" @click=${this.navigateToPreviousResponse} ?disabled=${this.currentResponseIndex <= 0}>
-                        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M11 5l-4 4 4 4"/>
-                        </svg>
-                    </button>
-
-                    ${this.responses.length > 0 ? html` <span class="response-counter">${responseCounter}</span> ` : ''}
-
-                    <input type="text" id="textInput" placeholder="Type your question..." @keydown=${this.handleTextKeydown} />
-
-                    <button class="nav-button" @click=${this.navigateToNextResponse} ?disabled=${this.currentResponseIndex >= this.responses.length - 1}>
-                        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M7 5l4 4-4 4"/>
-                        </svg>
-                    </button>
+                    <div style="display: flex; gap: 5px; align-items: center;">
+                        <button class="nav-button" @click=${this.decreaseFontSize} title="Decrease Font Size" style="width: 30px; height: 30px; font-size: 18px; font-weight: bold;">-</button>
+                        <button class="nav-button" @click=${this.increaseFontSize} title="Increase Font Size" style="width: 30px; height: 30px; font-size: 18px; font-weight: bold;">+</button>
+                    </div>
+                    ${this.responses.length > 0 ? html` <span class="response-counter">${this.responses.length}</span> ` : ''}
+                    <div class="input-container" style="flex: 1; display: flex; gap: 10px;">
+                        <input type="text" id="textInput" placeholder="Type your question..." @keydown=${this.handleKeyDown} @paste=${this.handlePaste} />
+                        <button id="sendButton" @click=${this.handleSendText}>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 20px; height: 20px;">
+                                <line x1="22" y1="2" x2="11" y2="13"></line>
+                                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                            </svg>
+                        </button>
+                    </div>
                 </div>
             </div>
         `;

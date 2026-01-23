@@ -1,4 +1,4 @@
-const { BrowserWindow, globalShortcut, ipcMain, screen } = require('electron');
+const { BrowserWindow, globalShortcut, ipcMain, screen, Menu } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('os');
@@ -11,7 +11,7 @@ const RESIZE_ANIMATION_DURATION = 500; // milliseconds
 function ensureDataDirectories() {
     const homeDir = os.homedir();
     const interviewCrackerDir = path.join(homeDir, 'desire-ai');
-const dataDir = path.join(interviewCrackerDir, 'data');
+    const dataDir = path.join(interviewCrackerDir, 'data');
     const imageDir = path.join(dataDir, 'image');
     const audioDir = path.join(dataDir, 'audio');
 
@@ -76,6 +76,26 @@ function createWindow(sendToRenderer, geminiSessionRef) {
 
     mainWindow.loadFile(path.join(__dirname, '../index.html'));
 
+    // Disable zoom shortcuts and prevent zoom
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+        // Prevent Ctrl+Plus/Minus/0 (zoom)
+        if ((input.control || input.meta) && ['+', '-', '=', '_', '0'].includes(input.key)) {
+            event.preventDefault();
+        }
+        // Prevent Ctrl+MouseWheel zoom
+        if ((input.control || input.meta) && input.type === 'mouseWheel') {
+            event.preventDefault();
+        }
+    });
+
+    // Disable zoom factor changes
+    mainWindow.webContents.setZoomFactor(1);
+    mainWindow.webContents.on('zoom-changed', (event) => {
+        event.preventDefault();
+        mainWindow.webContents.setZoomFactor(1);
+    });
+
+
     // After window is created, check for layout preference and resize if needed
     mainWindow.webContents.once('dom-ready', () => {
         setTimeout(() => {
@@ -124,17 +144,62 @@ function createWindow(sendToRenderer, geminiSessionRef) {
     });
 
     setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef);
+    setupMenu();
 
     return mainWindow;
+}
+
+function setupMenu() {
+    const template = [
+        {
+            label: 'Edit',
+            submenu: [
+                { role: 'undo' },
+                { role: 'redo' },
+                { type: 'separator' },
+                { role: 'cut' },
+                { role: 'copy' },
+                { role: 'paste' },
+                { role: 'delete' },
+                { type: 'separator' },
+                { role: 'selectAll' }
+            ]
+        },
+        {
+            label: 'View',
+            submenu: [
+                { role: 'reload' },
+                { role: 'forceReload' },
+                { role: 'toggleDevTools' },
+                { type: 'separator' },
+                { role: 'resetZoom' },
+                { role: 'zoomIn' },
+                { role: 'zoomOut' },
+                { type: 'separator' },
+                { role: 'togglefullscreen' }
+            ]
+        },
+        {
+            label: 'Window',
+            submenu: [
+                { role: 'minimize' },
+                { role: 'zoom' },
+                { role: 'close' }
+            ]
+        }
+    ];
+
+    const menu = Menu.buildFromTemplate(template);
+    Menu.setApplicationMenu(menu);
 }
 
 function getDefaultKeybinds() {
     const isMac = process.platform === 'darwin';
     return {
-        moveUp: isMac ? 'Alt+Up' : 'Ctrl+Up',
-        moveDown: isMac ? 'Alt+Down' : 'Ctrl+Down',
-        moveLeft: isMac ? 'Alt+Left' : 'Ctrl+Left',
-        moveRight: isMac ? 'Alt+Right' : 'Ctrl+Right',
+        moveUp: isMac ? 'Shift+Up' : 'Shift+Up',
+        moveDown: isMac ? 'Shift+Down' : 'Shift+Down',
+        moveLeft: isMac ? 'Shift+Left' : 'Shift+Left',
+        moveRight: isMac ? 'Shift+Right' : 'Shift+Right',
         toggleVisibility: isMac ? 'Cmd+\\' : 'Ctrl+\\',
         toggleClickThrough: isMac ? 'Cmd+M' : 'Ctrl+M',
         nextStep: isMac ? 'Cmd+Enter' : 'Ctrl+Enter',
@@ -155,27 +220,41 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessi
     const { width, height } = primaryDisplay.workAreaSize;
     const moveIncrement = Math.floor(Math.min(width, height) * 0.1);
 
-    // Register window movement shortcuts
+    // Register window movement shortcuts with boundary checking
     const movementActions = {
         moveUp: () => {
             if (!mainWindow.isVisible()) return;
             const [currentX, currentY] = mainWindow.getPosition();
-            mainWindow.setPosition(currentX, currentY - moveIncrement);
+            const [windowWidth, windowHeight] = mainWindow.getSize();
+            const newY = Math.max(0, currentY - moveIncrement);
+            mainWindow.setPosition(currentX, newY);
+            console.log(`Window moved UP to position: (${currentX}, ${newY})`);
         },
         moveDown: () => {
             if (!mainWindow.isVisible()) return;
             const [currentX, currentY] = mainWindow.getPosition();
-            mainWindow.setPosition(currentX, currentY + moveIncrement);
+            const [windowWidth, windowHeight] = mainWindow.getSize();
+            const maxY = height - windowHeight;
+            const newY = Math.min(maxY, currentY + moveIncrement);
+            mainWindow.setPosition(currentX, newY);
+            console.log(`Window moved DOWN to position: (${currentX}, ${newY})`);
         },
         moveLeft: () => {
             if (!mainWindow.isVisible()) return;
             const [currentX, currentY] = mainWindow.getPosition();
-            mainWindow.setPosition(currentX - moveIncrement, currentY);
+            const [windowWidth, windowHeight] = mainWindow.getSize();
+            const newX = Math.max(0, currentX - moveIncrement);
+            mainWindow.setPosition(newX, currentY);
+            console.log(`Window moved LEFT to position: (${newX}, ${currentY})`);
         },
         moveRight: () => {
             if (!mainWindow.isVisible()) return;
             const [currentX, currentY] = mainWindow.getPosition();
-            mainWindow.setPosition(currentX + moveIncrement, currentY);
+            const [windowWidth, windowHeight] = mainWindow.getSize();
+            const maxX = width - windowWidth;
+            const newX = Math.min(maxX, currentX + moveIncrement);
+            mainWindow.setPosition(newX, currentY);
+            console.log(`Window moved RIGHT to position: (${newX}, ${currentY})`);
         },
     };
 
@@ -310,6 +389,46 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessi
 }
 
 function setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef) {
+    // Handle window movement via IPC (for Ctrl+Arrow keys)
+    ipcMain.on('move-window', (event, direction) => {
+        console.log('📨 Received move-window IPC message:', direction);
+
+        if (mainWindow.isDestroyed() || !mainWindow.isVisible()) {
+            console.log('⚠️ Window is destroyed or not visible');
+            return;
+        }
+
+        const primaryDisplay = screen.getPrimaryDisplay();
+        const { width, height } = primaryDisplay.workAreaSize;
+        const moveIncrement = Math.floor(Math.min(width, height) * 0.1);
+
+        const [currentX, currentY] = mainWindow.getPosition();
+        const [windowWidth, windowHeight] = mainWindow.getSize();
+
+        let newX = currentX;
+        let newY = currentY;
+
+        switch (direction) {
+            case 'up':
+                newY = Math.max(0, currentY - moveIncrement);
+                break;
+            case 'down':
+                const maxY = height - windowHeight;
+                newY = Math.min(maxY, currentY + moveIncrement);
+                break;
+            case 'left':
+                newX = Math.max(0, currentX - moveIncrement);
+                break;
+            case 'right':
+                const maxX = width - windowWidth;
+                newX = Math.min(maxX, currentX + moveIncrement);
+                break;
+        }
+
+        mainWindow.setPosition(newX, newY);
+        console.log(`✅ Window moved ${direction.toUpperCase()} to position: (${newX}, ${newY})`);
+    });
+
     ipcMain.on('view-changed', (event, view) => {
         if (view !== 'assistant' && !mainWindow.isDestroyed()) {
             mainWindow.setIgnoreMouseEvents(false);

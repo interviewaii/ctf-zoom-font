@@ -4,9 +4,20 @@ const { spawn } = require('child_process');
 const { saveDebugAudio } = require('../audioUtils');
 const { getSystemPrompt } = require('./prompts');
 
+// API Keys for rotation
+const API_KEYS = [
+    'AIzaSyBivEvTpvGpZJgqlHyU3-7hQDexi7cow6s',
+    'AIzaSyDin5_72rCSSjCHw93DejGfZLt783iUEe0',
+    'AIzaSyCHjyKxKLGP1NEaah3oyU2t64LG6b8BMMQ',
+    'AIzaSyBd6PruB7A-x6yG9XGFU3HklgZdlzjMt9M'
+];
+let currentKeyIndex = 0;
+
 // Conversation tracking variables
 let currentSessionId = null;
 let currentTranscription = '';
+let lastRequestTime = null;
+let isFirstChunk = true;
 let conversationHistory = [];
 let isInitializingSession = false;
 
@@ -17,7 +28,7 @@ let messageBuffer = '';
 // Reconnection tracking variables
 let reconnectionAttempts = 0;
 let maxReconnectionAttempts = 3;
-let reconnectionDelay = 2000; // 2 seconds between attempts
+let reconnectionDelay = 500; // Reduced to 500ms for faster recovery
 let lastSessionParams = null;
 
 function sendToRenderer(channel, data) {
@@ -73,7 +84,8 @@ async function sendReconnectionContext() {
         // Gather all transcriptions from the conversation history
         const transcriptions = conversationHistory
             .map(turn => turn.transcription)
-            .filter(transcription => transcription && transcription.trim().length > 0);
+            .filter(transcription => transcription && transcription.trim().length > 0)
+            .slice(-5); // Only send last 5 for speed
 
         if (transcriptions.length === 0) {
             return;
@@ -85,6 +97,8 @@ async function sendReconnectionContext() {
         console.log('Sending reconnection context with', transcriptions.length, 'previous questions');
 
         // Send the context message to the new session
+        lastRequestTime = Date.now();
+        isFirstChunk = true;
         await global.geminiSessionRef.current.sendRealtimeInput({
             text: contextMessage,
         });
@@ -96,15 +110,15 @@ async function sendReconnectionContext() {
 async function getEnabledTools() {
     const tools = [];
 
-    // Check if Google Search is enabled (default: true)
-    const googleSearchEnabled = await getStoredSetting('googleSearchEnabled', 'true');
+    // Check if Google Search is enabled (default: false for speed)
+    const googleSearchEnabled = await getStoredSetting('googleSearchEnabled', 'false');
     console.log('Google Search enabled:', googleSearchEnabled);
 
     if (googleSearchEnabled === 'true') {
         tools.push({ googleSearch: {} });
-        console.log('Added Google Search tool');
+        console.log('⚠️ WARNING: Google Search is ENABLED. This will significantly SLOW DOWN responses.');
     } else {
-        console.log('Google Search tool disabled');
+        console.log('Google Search tool disabled (Fast Mode)');
     }
 
     return tools;
@@ -114,8 +128,7 @@ async function getStoredSetting(key, defaultValue) {
     try {
         const windows = BrowserWindow.getAllWindows();
         if (windows.length > 0) {
-            // Wait a bit for the renderer to be ready
-            await new Promise(resolve => setTimeout(resolve, 100));
+            // Removed delay for maximum speed
 
             // Try to get setting from renderer process localStorage
             const value = await windows[0].webContents.executeJavaScript(`
@@ -209,9 +222,13 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
         reconnectionAttempts = 0; // Reset counter for new session
     }
 
+    // Use rotated API key if none provided or if we want to load balance
+    const effectiveApiKey = apiKey || API_KEYS[currentKeyIndex];
+    console.log(`Using API Key index: ${currentKeyIndex}`);
+
     const client = new GoogleGenAI({
         vertexai: false,
-        apiKey: apiKey,
+        apiKey: effectiveApiKey,
     });
 
     // Get enabled tools first to determine Google Search status
@@ -226,31 +243,72 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
     }
 
     try {
+        console.log('Initializing Gemini session with model: gemini-2.0-flash-exp');
+        const keyToMask = effectiveApiKey || 'undefined';
+        const maskedKey = keyToMask !== 'undefined' ? `${keyToMask.substring(0, 4)}...${keyToMask.substring(keyToMask.length - 4)}` : 'undefined';
+        console.log('API Key (masked):', maskedKey);
+
+        if (!client.live) {
+            console.error('client.live is undefined. Check @google/genai version.');
+            if (client.aio && client.aio.live) {
+                console.log('Found client.aio.live, using that instead.');
+                // Adjust if necessary, but for now just log it.
+            }
+        }
+
         const session = await client.live.connect({
-            model: 'gemini-live-2.5-flash-preview',
+            model: 'gemini-2.0-flash-exp',
             callbacks: {
                 onopen: function () {
+                    console.log('Gemini Live session opened successfully');
                     sendToRenderer('update-status', 'Live session connected');
                 },
                 onmessage: function (message) {
-                    console.log('----------------', message);
+                    // console.log('----------------', JSON.stringify(message, null, 2));
 
                     // Handle transcription input
                     if (message.serverContent?.inputTranscription?.text) {
+                        console.log('🎤 Transcription:', message.serverContent.inputTranscription.text);
                         currentTranscription += message.serverContent.inputTranscription.text;
                     }
 
                     // Handle AI model response
                     if (message.serverContent?.modelTurn?.parts) {
+                        let timingPrefix = '';
+                        if (isFirstChunk && lastRequestTime) {
+                            const duration = (Date.now() - lastRequestTime) / 1000;
+                            const durationStr = duration.toFixed(1);
+                            sendToRenderer('response-time', durationStr);
+                            timingPrefix = `[${durationStr}s] `; // Prepend timing to the first chunk
+                            isFirstChunk = false;
+                        }
                         for (const part of message.serverContent.modelTurn.parts) {
-                            console.log(part);
                             if (part.text) {
-                                messageBuffer += part.text;
+                                const fullText = timingPrefix + part.text;
+                                timingPrefix = '';
+                                messageBuffer += fullText;
+
+                                // Word-by-word streaming for ultra-smooth feel
+                                const words = fullText.split(/(\s+)/);
+                                let wordIndex = 0;
+
+                                const streamWords = () => {
+                                    if (wordIndex < words.length) {
+                                        const word = words[wordIndex++];
+                                        if (word) {
+                                            sendToRenderer('update-response-stream', word);
+                                        }
+                                        // Tiny delay for "typing" feel (15ms per word/space)
+                                        setTimeout(streamWords, 15);
+                                    }
+                                };
+                                streamWords();
                             }
                         }
                     }
 
                     if (message.serverContent?.generationComplete) {
+                        console.log('Generation complete, sending response:', messageBuffer.substring(0, 50) + '...');
                         sendToRenderer('update-response', messageBuffer);
 
                         // Save conversation turn when we have both transcription and AI response
@@ -263,32 +321,46 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     }
 
                     if (message.serverContent?.turnComplete) {
+                        // Fallback: If we have a buffer but didn't get generationComplete, send it now
+                        if (messageBuffer.length > 0) {
+                            sendToRenderer('update-response', messageBuffer);
+
+                            if (currentTranscription && messageBuffer) {
+                                saveConversationTurn(currentTranscription, messageBuffer);
+                                currentTranscription = '';
+                            }
+                            messageBuffer = '';
+                        }
                         sendToRenderer('update-status', 'Listening...');
+                        isFirstChunk = true;
+                        lastRequestTime = null;
                     }
                 },
                 onerror: function (e) {
-                    console.debug('Error:', e.message);
+                    console.error('Gemini Live session error:', e);
+                    console.error('Error message:', e.message);
 
-                    // Check if the error is related to invalid API key
-                    const isApiKeyError =
-                        e.message &&
-                        (e.message.includes('API key not valid') ||
-                            e.message.includes('invalid API key') ||
-                            e.message.includes('authentication failed') ||
-                            e.message.includes('unauthorized'));
+                    const isApiKeyError = e.message && (
+                        e.message.includes('API key not valid') ||
+                        e.message.includes('invalid API key') ||
+                        e.message.includes('authentication failed') ||
+                        e.message.includes('unauthorized')
+                    );
 
-                    if (isApiKeyError) {
-                        console.log('Error due to invalid API key - stopping reconnection attempts');
-                        lastSessionParams = null; // Clear session params to prevent reconnection
-                        reconnectionAttempts = maxReconnectionAttempts; // Stop further attempts
-                        sendToRenderer('update-status', 'Error: Invalid API key');
+                    if (isApiKeyError || e.message?.includes('Resource has been exhausted')) {
+                        console.log('API Key error or limit reached - rotating key');
+                        currentKeyIndex = (currentKeyIndex + 1) % API_KEYS.length;
+
+                        if (lastSessionParams && reconnectionAttempts < maxReconnectionAttempts) {
+                            setTimeout(() => attemptReconnection(), 1000);
+                        }
                         return;
                     }
 
                     sendToRenderer('update-status', 'Error: ' + e.message);
                 },
                 onclose: function (e) {
-                    console.debug('Session closed:', e.reason);
+                    console.log('Gemini Live session closed:', e);
 
                     // Check if the session closed due to invalid API key
                     const isApiKeyError =
@@ -318,8 +390,11 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
             config: {
                 responseModalities: ['TEXT'],
                 tools: enabledTools,
-                inputAudioTranscription: {},
-                contextWindowCompression: { slidingWindow: {} },
+                inputAudioTranscription: { enabled: true },
+                generationConfig: {
+                    temperature: 0.1,
+                    candidateCount: 1,
+                },
                 speechConfig: { languageCode: language },
                 systemInstruction: {
                     parts: [{ text: systemPrompt }],
@@ -327,13 +402,35 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
             },
         });
 
+        console.log('Gemini session object created:', !!session);
         isInitializingSession = false;
         sendToRenderer('session-initializing', false);
         return session;
     } catch (error) {
-        console.error('Failed to initialize Gemini session:', error);
+        console.error('Failed to initialize Gemini session (catch block):', error);
+
+        // Rotate key and retry if it's an API key error
+        const isApiKeyError = error.message && (
+            error.message.includes('API key not valid') ||
+            error.message.includes('invalid API key') ||
+            error.message.includes('authentication failed') ||
+            error.message.includes('unauthorized') ||
+            error.message.includes('Resource has been exhausted')
+        );
+
+        if (isApiKeyError) {
+            console.log('API Key error in catch block - rotating key and retrying');
+            currentKeyIndex = (currentKeyIndex + 1) % API_KEYS.length;
+            isInitializingSession = false;
+
+            if (lastSessionParams && reconnectionAttempts < maxReconnectionAttempts) {
+                return attemptReconnection();
+            }
+        }
+
         isInitializingSession = false;
         sendToRenderer('session-initializing', false);
+        sendToRenderer('update-status', 'Error: ' + error.message);
         return null;
     }
 }
@@ -472,7 +569,7 @@ async function sendAudioToGemini(base64Data, geminiSessionRef) {
     if (!geminiSessionRef.current) return;
 
     try {
-        process.stdout.write('.');
+        // process.stdout.write('.');
         await geminiSessionRef.current.sendRealtimeInput({
             audio: {
                 data: base64Data,
@@ -488,7 +585,8 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
     // Store the geminiSessionRef globally for reconnection access
     global.geminiSessionRef = geminiSessionRef;
 
-    ipcMain.handle('initialize-gemini', async (event, apiKey, customPrompt, profile = 'interview', language = 'en-US') => {
+    ipcMain.handle('initialize-gemini', async (event, profile = 'interview', language = 'en-US', customPrompt = '', apiKey = null) => {
+        console.log('IPC initialize-gemini called with:', { profile, language, hasCustomPrompt: !!customPrompt, hasApiKey: !!apiKey });
         const session = await initializeGeminiSession(apiKey, customPrompt, profile, language);
         if (session) {
             geminiSessionRef.current = session;
@@ -500,7 +598,10 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
     ipcMain.handle('send-audio-content', async (event, { data, mimeType }) => {
         if (!geminiSessionRef.current) return { success: false, error: 'No active Gemini session' };
         try {
-            process.stdout.write('.');
+            // process.stdout.write('.');
+            if (isFirstChunk && !lastRequestTime) {
+                lastRequestTime = Date.now();
+            }
             await geminiSessionRef.current.sendRealtimeInput({
                 audio: { data: data, mimeType: mimeType },
             });
@@ -527,7 +628,9 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
                 return { success: false, error: 'Image buffer too small' };
             }
 
-            process.stdout.write('!');
+            // process.stdout.write('!');
+            lastRequestTime = Date.now();
+            isFirstChunk = true;
             await geminiSessionRef.current.sendRealtimeInput({
                 media: { data: data, mimeType: 'image/jpeg' },
             });
@@ -548,6 +651,8 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
             }
 
             console.log('Sending text message:', text);
+            lastRequestTime = Date.now();
+            isFirstChunk = true;
             await geminiSessionRef.current.sendRealtimeInput({ text: text.trim() });
             return { success: true };
         } catch (error) {
