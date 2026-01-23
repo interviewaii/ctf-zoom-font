@@ -350,7 +350,7 @@ export class OnboardingView extends LitElement {
             align-items: center;
             gap: 6px;
             transition: all 0.2s ease;
-            cursor: pointer;
+
             width: 100%;
             justify-content: center;
         }
@@ -373,7 +373,7 @@ export class OnboardingView extends LitElement {
             border-radius: var(--border-radius);
             font-size: 14px;
             font-weight: 600;
-            cursor: pointer;
+
             transition: all 0.3s ease;
             width: 100%;
         }
@@ -387,7 +387,7 @@ export class OnboardingView extends LitElement {
         .context-toggle {
             font-size: 13px;
             color: var(--link-color);
-            cursor: pointer;
+
             user-select: none;
             margin: 2px 0 8px;
         }

@@ -41,7 +41,7 @@ export class HelpView extends LitElement {
             font-weight: 600;
             font-size: 15px;
             padding: 10px 22px;
-            cursor: pointer;
+
             transition: all 0.2s ease;
         }
 
@@ -134,7 +134,7 @@ export class HelpView extends LitElement {
         .link {
             color: var(--link-color);
             text-decoration: none;
-            cursor: pointer;
+
             transition: color 0.15s ease;
         }
 
@@ -241,7 +241,7 @@ export class HelpView extends LitElement {
             font-size: 11px;
             font-weight: 500;
             transition: all 0.15s ease;
-            cursor: pointer;
+
         }
 
         .community-link:hover {

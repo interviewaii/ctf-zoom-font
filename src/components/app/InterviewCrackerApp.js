@@ -239,6 +239,26 @@ export class InterviewCrackerApp extends LitElement {
         this.syncThemeState();
     }
 
+    async loadLatestSession() {
+        try {
+            if (window.interviewCracker && window.interviewCracker.getAllConversationSessions) {
+                const sessions = await window.interviewCracker.getAllConversationSessions();
+                if (sessions && sessions.length > 0) {
+                    const latestSession = sessions[0];
+                    if (latestSession.conversationHistory) {
+                        // Map conversation history to responses array
+                        this.responses = latestSession.conversationHistory.map(turn => turn.ai_response).filter(r => r);
+                        this.currentResponseIndex = this.responses.length - 1;
+                        this.requestUpdate();
+                        console.log('Loaded latest session history:', this.responses.length, 'responses');
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('Error loading latest session:', error);
+        }
+    }
+
     async verifyActivation() {
         // Check both old activation and new license system
         const oldActivation = await isActivationValid();
@@ -249,6 +269,9 @@ export class InterviewCrackerApp extends LitElement {
 
     connectedCallback() {
         super.connectedCallback();
+
+        // Load latest session history
+        this.loadLatestSession();
 
         // Set up IPC listeners if needed
         if (window.require) {
@@ -273,13 +296,21 @@ export class InterviewCrackerApp extends LitElement {
                 const isCtrl = e.ctrlKey || e.metaKey;
 
                 // Handle Shift+Arrow keys for window movement
-                if (isShift && !isCtrl && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+                const key = e.key;
+                const isArrowKey = ['ArrowUp', 'Up', 'ArrowDown', 'Down', 'ArrowLeft', 'Left', 'ArrowRight', 'Right'].includes(key);
+
+                if (isShift && !isCtrl && isArrowKey) {
                     e.preventDefault();
                     e.stopPropagation();
                     e.stopImmediatePropagation();
 
-                    const direction = e.key.replace('Arrow', '').toLowerCase();
-                    console.log('🚀 Moving window:', direction);
+                    let direction = '';
+                    if (key.includes('Up')) direction = 'up';
+                    else if (key.includes('Down')) direction = 'down';
+                    else if (key.includes('Left')) direction = 'left';
+                    else if (key.includes('Right')) direction = 'right';
+
+                    console.log('🚀 [Renderer] Shift + Arrow movement triggered:', direction, '(key:', key + ')');
                     ipcRenderer.send('move-window', direction);
                     return false;
                 }
@@ -291,7 +322,7 @@ export class InterviewCrackerApp extends LitElement {
 
                     const delta = (e.key === '-' || e.key === '_') ? -2 : 2;
                     this.adjustResponseFontSize(delta);
-                    console.log('📝 Response font size:', this.responseFontSize + 'px');
+                    console.log('📝 Response font size adjusted:', this.responseFontSize + 'px');
                     return false;
                 }
 
@@ -301,14 +332,17 @@ export class InterviewCrackerApp extends LitElement {
                     e.stopPropagation();
 
                     const delta = (e.key === '-' || e.key === '_') ? -10 : 10;
+                    console.log('🔍 UI zoom key pressed:', e.key, 'delta:', delta);
                     this.adjustUIZoom(delta);
-                    console.log('🔍 UI zoom level:', this.uiZoomLevel + '%');
                     return false;
                 }
 
                 // Prevent Ctrl+0 (reset zoom)
                 if (isCtrl && e.key === '0') {
                     e.preventDefault();
+                    this.uiZoomLevel = 100;
+                    this.applyUIZoom();
+                    localStorage.setItem('uiZoomLevel', '100');
                     return false;
                 }
             };
@@ -391,10 +425,28 @@ export class InterviewCrackerApp extends LitElement {
     }
 
     applyUIZoom() {
+        const zoomFactor = this.uiZoomLevel / 100;
+        if (window.require) {
+            try {
+                const { webFrame } = window.require('electron');
+                if (webFrame) {
+                    webFrame.setZoomFactor(zoomFactor);
+                    console.log('✅ Electron webFrame zoom set to:', zoomFactor);
+                }
+            } catch (error) {
+                console.error('Failed to set Electron zoom:', error);
+                document.body.style.zoom = zoomFactor;
+            }
+        } else {
+            document.body.style.zoom = zoomFactor;
+        }
+
+        // Also apply scale to container as a fallback/visual aid if needed, 
+        // but setZoomFactor is the primary method now.
         const container = this.shadowRoot?.querySelector('.window-container');
         if (container) {
-            container.style.transform = `scale(${this.uiZoomLevel / 100})`;
-            container.style.transformOrigin = 'top center';
+            // container.style.transform = `scale(${zoomFactor})`;
+            // container.style.transformOrigin = 'top center';
         }
     }
 
@@ -405,7 +457,7 @@ export class InterviewCrackerApp extends LitElement {
             this.responses[this.responses.length - 1] = response;
             this.isStreaming = false;
             this._inCodeBlock = false;
-            this.responses = [...this.responses]; // Force update for child components
+            this.responses = [...this.responses]; // Force update
         } else {
             // Only check license limits if user is already activated
             if (this.isActivated) {
@@ -418,6 +470,7 @@ export class InterviewCrackerApp extends LitElement {
             }
 
             this.responses.push(response);
+            this.responses = [...this.responses]; // Force update for child components
 
             // Track response for license limits (only if activated)
             if (this.isActivated) {
@@ -449,6 +502,37 @@ export class InterviewCrackerApp extends LitElement {
     }
 
     handleResponseStream(chunk) {
+        if (!this._streamBuffer) this._streamBuffer = '';
+        this._streamBuffer += chunk;
+
+        if (this._streamThrottleTimeout) return;
+
+        // Apply first chunk immediately for responsiveness
+        if (!this.isStreaming) {
+            this._applyStreamChunk(this._streamBuffer);
+            this._streamBuffer = '';
+            // Set a small delay before next update
+            this._streamThrottleTimeout = setTimeout(() => {
+                this._streamThrottleTimeout = null;
+                if (this._streamBuffer) {
+                    this._applyStreamChunk(this._streamBuffer);
+                    this._streamBuffer = '';
+                }
+            }, 100);
+            return;
+        }
+
+        this._streamThrottleTimeout = setTimeout(() => {
+            this._streamThrottleTimeout = null;
+            const bufferedChunk = this._streamBuffer;
+            this._streamBuffer = '';
+            if (bufferedChunk) {
+                this._applyStreamChunk(bufferedChunk);
+            }
+        }, 100);
+    }
+
+    _applyStreamChunk(chunk) {
         if (!this.isStreaming) {
             // Start of a new streaming response
             if (this.isActivated) {
@@ -629,6 +713,12 @@ export class InterviewCrackerApp extends LitElement {
         this.isListening = true;
         this.startTime = Date.now();
         this.currentView = 'assistant';
+
+        // Initialize new session in main process
+        if (window.require) {
+            const { ipcRenderer } = window.require('electron');
+            ipcRenderer.invoke('start-new-session');
+        }
     }
 
     async handleAPIKeyHelp() {
@@ -770,6 +860,12 @@ export class InterviewCrackerApp extends LitElement {
         if (changedProperties.has('isDarkMode')) {
             localStorage.setItem('isDarkMode', this.isDarkMode.toString());
         }
+
+        // Apply UI zoom after render
+        if (changedProperties.has('uiZoomLevel')) {
+            console.log('🔍 Applying UI zoom level:', this.uiZoomLevel + '%');
+            this.applyUIZoom();
+        }
     }
 
     renderCurrentView() {
@@ -830,6 +926,7 @@ export class InterviewCrackerApp extends LitElement {
                         .responseFontSize=${this.responseFontSize}
                         .onSendText=${message => this.handleSendText(message)}
                         @response-index-changed=${this.handleResponseIndexChanged}
+                        @adjust-zoom=${(e) => this.adjustUIZoom(e.detail.delta)}
                         @navigate-to-main=${() => { this.currentView = 'main'; this.requestUpdate(); }}
                     ></assistant-view>
                 `;
@@ -892,14 +989,6 @@ export class InterviewCrackerApp extends LitElement {
         `;
     }
 
-    updated(changedProperties) {
-        super.updated(changedProperties);
-
-        // Apply UI zoom after render
-        if (changedProperties.has('uiZoomLevel')) {
-            this.applyUIZoom();
-        }
-    }
 
     updateLayoutMode() {
         // Apply or remove compact layout class to document root

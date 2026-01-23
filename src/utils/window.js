@@ -32,6 +32,8 @@ function createWindow(sendToRenderer, geminiSessionRef) {
     const mainWindow = new BrowserWindow({
         width: windowWidth,
         height: windowHeight,
+        minWidth: 400,
+        minHeight: 300,
         frame: false,
         transparent: true,
         hasShadow: false,
@@ -59,7 +61,7 @@ function createWindow(sendToRenderer, geminiSessionRef) {
         { useSystemPicker: true }
     );
 
-    mainWindow.setResizable(false);
+    mainWindow.setResizable(true);
     mainWindow.setContentProtection(true);
     mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
@@ -76,24 +78,11 @@ function createWindow(sendToRenderer, geminiSessionRef) {
 
     mainWindow.loadFile(path.join(__dirname, '../index.html'));
 
-    // Disable zoom shortcuts and prevent zoom
-    mainWindow.webContents.on('before-input-event', (event, input) => {
-        // Prevent Ctrl+Plus/Minus/0 (zoom)
-        if ((input.control || input.meta) && ['+', '-', '=', '_', '0'].includes(input.key)) {
-            event.preventDefault();
-        }
-        // Prevent Ctrl+MouseWheel zoom
-        if ((input.control || input.meta) && input.type === 'mouseWheel') {
-            event.preventDefault();
-        }
-    });
+    // Show the window after loading
+    mainWindow.showInactive();
 
-    // Disable zoom factor changes
+    // Allow renderer to handle zoom
     mainWindow.webContents.setZoomFactor(1);
-    mainWindow.webContents.on('zoom-changed', (event) => {
-        event.preventDefault();
-        mainWindow.webContents.setZoomFactor(1);
-    });
 
 
     // After window is created, check for layout preference and resize if needed
@@ -107,18 +96,29 @@ function createWindow(sendToRenderer, geminiSessionRef) {
                     `
                 try {
                     const savedKeybinds = localStorage.getItem('customKeybinds');
+                    const savedSize = localStorage.getItem('windowSize');
+                    const savedPos = localStorage.getItem('windowPosition');
                     
                     return {
-                        keybinds: savedKeybinds ? JSON.parse(savedKeybinds) : null
+                        keybinds: savedKeybinds ? JSON.parse(savedKeybinds) : null,
+                        size: savedSize ? JSON.parse(savedSize) : null,
+                        position: savedPos ? JSON.parse(savedPos) : null
                     };
                 } catch (e) {
-                    return { keybinds: null };
+                    return { keybinds: null, size: null, position: null };
                 }
             `
                 )
                 .then(async savedSettings => {
                     if (savedSettings.keybinds) {
                         keybinds = { ...defaultKeybinds, ...savedSettings.keybinds };
+                    }
+
+                    if (savedSettings.size) {
+                        mainWindow.setSize(savedSettings.size.width, savedSettings.size.height);
+                    }
+                    if (savedSettings.position) {
+                        mainWindow.setPosition(savedSettings.position.x, savedSettings.position.y);
                     }
 
                     // Apply content protection setting via IPC handler
@@ -142,6 +142,19 @@ function createWindow(sendToRenderer, geminiSessionRef) {
                 });
         }, 150);
     });
+
+    // Save window size and position on change
+    const saveBounds = () => {
+        if (mainWindow.isDestroyed()) return;
+        const bounds = mainWindow.getBounds();
+        mainWindow.webContents.executeJavaScript(`
+            localStorage.setItem('windowSize', JSON.stringify({ width: ${bounds.width}, height: ${bounds.height} }));
+            localStorage.setItem('windowPosition', JSON.stringify({ x: ${bounds.x}, y: ${bounds.y} }));
+        `).catch(err => console.error('Failed to save window bounds:', err));
+    };
+
+    mainWindow.on('resize', saveBounds);
+    mainWindow.on('move', saveBounds);
 
     setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef);
     setupMenu();
@@ -263,10 +276,23 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessi
         const keybind = keybinds[action];
         if (keybind) {
             try {
-                globalShortcut.register(keybind, movementActions[action]);
-                console.log(`Registered ${action}: ${keybind}`);
+                const success = globalShortcut.register(keybind, movementActions[action]);
+                if (success) {
+                    console.log(`✅ Registered global shortcut ${action}: ${keybind}`);
+                } else {
+                    console.error(`❌ Failed to register global shortcut ${action}: ${keybind} (already in use or invalid)`);
+
+                    // Try fallback with Arrow suffix if it's a simple direction
+                    if (['Up', 'Down', 'Left', 'Right'].includes(keybind.split('+').pop())) {
+                        const fallback = keybind.replace(/Up|Down|Left|Right/, (m) => m + 'Arrow');
+                        const fallbackSuccess = globalShortcut.register(fallback, movementActions[action]);
+                        if (fallbackSuccess) {
+                            console.log(`✅ Registered fallback global shortcut ${action}: ${fallback}`);
+                        }
+                    }
+                }
             } catch (error) {
-                console.error(`Failed to register ${action} (${keybind}):`, error);
+                console.error(`💥 Error registering ${action} (${keybind}):`, error);
             }
         }
     });
@@ -389,44 +415,69 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessi
 }
 
 function setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef) {
-    // Handle window movement via IPC (for Ctrl+Arrow keys)
+    // Remove existing listeners to avoid duplicates
+    ipcMain.removeAllListeners('move-window');
+    ipcMain.removeAllListeners('view-changed');
+    ipcMain.removeHandler('window-minimize');
+    ipcMain.removeAllListeners('update-keybinds');
+    ipcMain.removeHandler('toggle-window-visibility');
+    ipcMain.removeHandler('toggle-screen-share-visibility');
+    ipcMain.removeHandler('update-sizes');
+    ipcMain.removeHandler('manual-resize');
+
+    // Handle window movement via IPC (for Shift+Arrow keys from renderer)
     ipcMain.on('move-window', (event, direction) => {
         console.log('📨 Received move-window IPC message:', direction);
 
-        if (mainWindow.isDestroyed() || !mainWindow.isVisible()) {
-            console.log('⚠️ Window is destroyed or not visible');
+        if (mainWindow.isDestroyed()) {
+            console.log('⚠️ Window is destroyed, cannot move');
             return;
         }
 
-        const primaryDisplay = screen.getPrimaryDisplay();
-        const { width, height } = primaryDisplay.workAreaSize;
-        const moveIncrement = Math.floor(Math.min(width, height) * 0.1);
+        try {
+            // Get screen dimensions
+            const primaryDisplay = screen.getPrimaryDisplay();
+            const { width, height } = primaryDisplay.workAreaSize;
 
-        const [currentX, currentY] = mainWindow.getPosition();
-        const [windowWidth, windowHeight] = mainWindow.getSize();
+            const bounds = mainWindow.getBounds();
+            const moveIncrement = 50; // Fixed 50px increment for better control
 
-        let newX = currentX;
-        let newY = currentY;
+            let newX = bounds.x;
+            let newY = bounds.y;
 
-        switch (direction) {
-            case 'up':
-                newY = Math.max(0, currentY - moveIncrement);
-                break;
-            case 'down':
-                const maxY = height - windowHeight;
-                newY = Math.min(maxY, currentY + moveIncrement);
-                break;
-            case 'left':
-                newX = Math.max(0, currentX - moveIncrement);
-                break;
-            case 'right':
-                const maxX = width - windowWidth;
-                newX = Math.min(maxX, currentX + moveIncrement);
-                break;
+            switch (direction) {
+                case 'up':
+                    newY = Math.max(0, bounds.y - moveIncrement);
+                    break;
+                case 'down':
+                    const maxY = height - bounds.height;
+                    newY = Math.min(maxY, bounds.y + moveIncrement);
+                    break;
+                case 'left':
+                    newX = Math.max(0, bounds.x - moveIncrement);
+                    break;
+                case 'right':
+                    const maxX = width - bounds.width;
+                    newX = Math.min(maxX, bounds.x + moveIncrement);
+                    break;
+                default:
+                    console.log('⚠️ Unknown direction:', direction);
+                    return;
+            }
+
+            mainWindow.setBounds({
+                x: newX,
+                y: newY,
+                width: bounds.width,
+                height: bounds.height
+            });
+            console.log(`✅ Window moved ${direction.toUpperCase()} to position: (${newX}, ${newY})`);
+
+            // Notify renderer about the move to ensure state is synced if needed
+            mainWindow.webContents.send('window-moved', { x: newX, y: newY });
+        } catch (error) {
+            console.error('💥 Error moving window:', error);
         }
-
-        mainWindow.setPosition(newX, newY);
-        console.log(`✅ Window moved ${direction.toUpperCase()} to position: (${newX}, ${newY})`);
     });
 
     ipcMain.on('view-changed', (event, view) => {
@@ -518,6 +569,9 @@ function setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef) {
             const widthDiff = targetWidth - startWidth;
             const heightDiff = targetHeight - startHeight;
 
+            const primaryDisplay = screen.getPrimaryDisplay();
+            const { width: screenWidth } = primaryDisplay.workAreaSize;
+
             resizeAnimation = setInterval(() => {
                 currentFrame++;
                 const progress = currentFrame / totalFrames;
@@ -537,8 +591,6 @@ function setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef) {
                 mainWindow.setSize(currentWidth, currentHeight);
 
                 // Re-center the window during animation
-                const primaryDisplay = screen.getPrimaryDisplay();
-                const { width: screenWidth } = primaryDisplay.workAreaSize;
                 const x = Math.floor((screenWidth - currentWidth) / 2);
                 const y = 0;
                 mainWindow.setPosition(x, y);
@@ -582,6 +634,19 @@ function setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef) {
         }
     });
 }
+
+ipcMain.handle('manual-resize', async (event) => {
+    try {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.setResizable(true);
+            return { success: true };
+        }
+        return { success: false, error: 'Window not available' };
+    } catch (e) {
+        console.error('manual-resize error', e);
+        return { success: false, error: e.message };
+    }
+});
 
 module.exports = {
     ensureDataDirectories,

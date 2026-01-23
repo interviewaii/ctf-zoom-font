@@ -90,6 +90,15 @@
             --border-radius: 18px;
             --content-border-radius: 18px;
             --response-font-size: 18px;
+
+            /* Additional Variables for CustomizeView */
+            --bg-secondary: rgba(0, 0, 0, 0.25);
+            --bg-tertiary: rgba(255, 255, 255, 0.08);
+            --text-secondary: rgba(255, 255, 255, 0.7);
+            --text-muted: rgba(255, 255, 255, 0.5);
+            --border-default: rgba(255, 255, 255, 0.2);
+            --error-color: #ef4444;
+            --success-color: #10b981;
         }
 
         /* Light Mode Theme (glass, highly transparent like dark) */
@@ -179,12 +188,15 @@
             --warning-color: #d97706;
             --warning-background: rgba(217, 119, 6, 0.08);
             --warning-border: rgba(217, 119, 6, 0.2);
-        }
 
-        /* Theme transition - only for specific properties to avoid performance issues */
-        :root,
-        :root * {
-            transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+            /* Additional Variables for CustomizeView */
+            --bg-secondary: rgba(255, 255, 255, 0.25);
+            --bg-tertiary: rgba(31, 41, 55, 0.08);
+            --text-secondary: rgba(31, 41, 55, 0.7);
+            --text-muted: rgba(31, 41, 55, 0.5);
+            --border-default: rgba(31, 41, 55, 0.2);
+            --error-color: #dc2626;
+            --success-color: #059669;
         }
 
         /* Exclude certain elements from transitions to prevent glitches */
@@ -268,58 +280,6 @@
 
     <interview-ai-app id="interview-ai"></interview-ai-app>
     <script src="utils/renderer.js"></script>
-
-    <script>
-        const { ipcRenderer } = require('electron');
-
-        console.log('🎮 Keyboard handler script loaded');
-
-        // Function to handle window movement
-        function handleWindowMovement(e) {
-            const isCtrl = e.ctrlKey || e.metaKey;
-
-            console.log('Key pressed:', e.key, 'Ctrl:', isCtrl);
-
-            // Handle Ctrl+Arrow keys for window movement via IPC
-            if (isCtrl && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
-                e.preventDefault();
-                e.stopPropagation();
-                e.stopImmediatePropagation();
-
-                // Send IPC message to move window
-                const direction = e.key.replace('Arrow', '').toLowerCase();
-                console.log('🚀 Moving window:', direction);
-                ipcRenderer.send('move-window', direction);
-                return false;
-            }
-
-            // Prevent Ctrl+Plus/Minus/0 (zoom controls)
-            if (isCtrl && ['+', '-', '=', '_', '0'].includes(e.key)) {
-                e.preventDefault();
-                e.stopPropagation();
-                console.log('🚫 Prevented zoom shortcut:', e.key);
-                return false;
-            }
-        }
-
-        // Attach to multiple targets to ensure we catch the events
-        document.addEventListener('keydown', handleWindowMovement, true);
-        window.addEventListener('keydown', handleWindowMovement, true);
-
-        // Also attach after DOM is ready
-        document.addEventListener('DOMContentLoaded', function () {
-            console.log('✅ DOM loaded, attaching additional listeners');
-            document.body.addEventListener('keydown', handleWindowMovement, true);
-        });
-
-        // Prevent zoom via mouse wheel + Ctrl
-        document.addEventListener('wheel', function (e) {
-            if (e.ctrlKey || e.metaKey) {
-                e.preventDefault();
-                return false;
-            }
-        }, { passive: false });
-    </script>
 </body>
 
 </html>

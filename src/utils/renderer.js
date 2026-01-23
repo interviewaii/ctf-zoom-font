@@ -261,10 +261,19 @@ async function startCapture(screenshotIntervalSeconds = 2, imageQuality = 'mediu
             // Don't start automatic capture in manual mode
         } else {
             const intervalMilliseconds = parseInt(screenshotIntervalSeconds) * 1000;
-            screenshotInterval = setInterval(() => captureScreenshot(imageQuality), intervalMilliseconds);
 
-            // Capture first screenshot immediately
-            setTimeout(() => captureScreenshot(imageQuality), 100);
+            const scheduleNextCapture = () => {
+                screenshotInterval = setTimeout(async () => {
+                    await captureScreenshot(imageQuality);
+                    scheduleNextCapture();
+                }, intervalMilliseconds);
+            };
+
+            // Capture first screenshot immediately and start the loop
+            setTimeout(async () => {
+                await captureScreenshot(imageQuality);
+                scheduleNextCapture();
+            }, 100);
         }
     } catch (err) {
         console.error('Error starting capture:', err);
@@ -358,10 +367,25 @@ async function captureScreenshot(imageQuality = 'medium', isManual = false) {
             hiddenVideo.onloadedmetadata = () => resolve();
         });
 
-        // Lazy init of canvas based on video dimensions
+        // Lazy init of canvas based on video dimensions with downscaling
         offscreenCanvas = document.createElement('canvas');
-        offscreenCanvas.width = hiddenVideo.videoWidth;
-        offscreenCanvas.height = hiddenVideo.videoHeight;
+        const maxDim = 1024;
+        let width = hiddenVideo.videoWidth;
+        let height = hiddenVideo.videoHeight;
+
+        if (width > maxDim || height > maxDim) {
+            if (width > height) {
+                height = Math.round((height * maxDim) / width);
+                width = maxDim;
+            } else {
+                width = Math.round((width * maxDim) / height);
+                height = maxDim;
+            }
+            console.log(`Downscaling screenshot from ${hiddenVideo.videoWidth}x${hiddenVideo.videoHeight} to ${width}x${height}`);
+        }
+
+        offscreenCanvas.width = width;
+        offscreenCanvas.height = height;
         offscreenContext = offscreenCanvas.getContext('2d');
     }
 
@@ -665,4 +689,69 @@ window.interviewAI = window.interviewCracker = {
     isLinux: isLinux,
     isMacOS: isMacOS,
     e: interviewCrackerElement,
+
+    // Storage functions for CustomizeView
+    storage: {
+        async getPreferences() {
+            return {
+                googleSearchEnabled: localStorage.getItem('googleSearchEnabled') === 'true',
+                backgroundTransparency: parseFloat(localStorage.getItem('backgroundTransparency') || '0.8'),
+                fontSize: parseInt(localStorage.getItem('fontSize') || '20', 10),
+                audioMode: localStorage.getItem('audioMode') || 'speaker_only',
+                customPrompt: localStorage.getItem('customPrompt') || '',
+                theme: localStorage.getItem('theme') || 'dark'
+            };
+        },
+        async getKeybinds() {
+            const saved = localStorage.getItem('customKeybinds');
+            return saved ? JSON.parse(saved) : null;
+        },
+        async setKeybinds(keybinds) {
+            if (keybinds === null) {
+                localStorage.removeItem('customKeybinds');
+            } else {
+                localStorage.setItem('customKeybinds', JSON.stringify(keybinds));
+            }
+        },
+        async updatePreference(key, value) {
+            localStorage.setItem(key, value.toString());
+        },
+        async clearAll() {
+            localStorage.clear();
+        }
+    },
+
+    // Theme functions for CustomizeView
+    theme: {
+        getAll() {
+            return [
+                { value: 'dark', name: 'Dark' },
+                { value: 'light', name: 'Light' }
+            ];
+        },
+        get(themeName) {
+            const themes = {
+                dark: {
+                    background: 'rgba(0, 0, 0, 0.3)',
+                    text: '#f7f7fa'
+                },
+                light: {
+                    background: 'rgba(255, 255, 255, 0.3)',
+                    text: '#1f2937'
+                }
+            };
+            return themes[themeName] || themes.dark;
+        },
+        async save(themeName) {
+            localStorage.setItem('theme', themeName);
+            // Apply theme to document
+            document.documentElement.setAttribute('data-theme', themeName);
+        },
+        applyBackgrounds(backgroundColor, transparency) {
+            // Apply background with transparency
+            const root = document.documentElement;
+            root.style.setProperty('--background-transparent', backgroundColor.replace(/[\d.]+\)$/, `${transparency})`));
+        }
+    }
 };
+

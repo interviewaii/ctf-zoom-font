@@ -288,21 +288,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                                 timingPrefix = '';
                                 messageBuffer += fullText;
 
-                                // Word-by-word streaming for ultra-smooth feel
-                                const words = fullText.split(/(\s+)/);
-                                let wordIndex = 0;
-
-                                const streamWords = () => {
-                                    if (wordIndex < words.length) {
-                                        const word = words[wordIndex++];
-                                        if (word) {
-                                            sendToRenderer('update-response-stream', word);
-                                        }
-                                        // Tiny delay for "typing" feel (15ms per word/space)
-                                        setTimeout(streamWords, 15);
-                                    }
-                                };
-                                streamWords();
+                                sendToRenderer('update-response-stream', fullText);
                             }
                         }
                     }
@@ -391,10 +377,8 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                 responseModalities: ['TEXT'],
                 tools: enabledTools,
                 inputAudioTranscription: { enabled: true },
-                generationConfig: {
-                    temperature: 0.1,
-                    candidateCount: 1,
-                },
+                temperature: 0.1,
+                candidateCount: 1,
                 speechConfig: { languageCode: language },
                 systemInstruction: {
                     parts: [{ text: systemPrompt }],

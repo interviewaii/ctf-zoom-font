@@ -59,11 +59,6 @@ function setupGeneralIpcHandlers() {
         }
     });
 
-    ipcMain.on('update-keybinds', (event, newKeybinds) => {
-        if (mainWindow) {
-            updateGlobalShortcuts(newKeybinds, mainWindow, sendToRenderer, geminiSessionRef);
-        }
-    });
 
     ipcMain.handle('update-content-protection', async event => {
         try {

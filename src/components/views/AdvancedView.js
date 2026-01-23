@@ -117,7 +117,7 @@ export class AdvancedView extends LitElement {
             border-radius: 4px;
             font-size: 11px;
             font-weight: 500;
-            cursor: pointer;
+
             transition: all 0.15s ease;
             display: flex;
             align-items: center;
@@ -271,14 +271,14 @@ export class AdvancedView extends LitElement {
             width: 14px;
             height: 14px;
             accent-color: var(--focus-border-color, #007aff);
-            cursor: pointer;
+
         }
 
         .checkbox-label {
             font-weight: 500;
             font-size: 12px;
             color: var(--label-color, rgba(255, 255, 255, 0.9));
-            cursor: pointer;
+
             user-select: none;
         }
 
@@ -556,12 +556,12 @@ export class AdvancedView extends LitElement {
                         </button>
 
                         ${this.statusMessage
-                            ? html`
+                ? html`
                                   <div class="status-message ${this.statusType === 'success' ? 'status-success' : 'status-error'}">
                                       ${this.statusMessage}
                                   </div>
                               `
-                            : ''}
+                : ''}
                     </div>
                 </div>
             </div>

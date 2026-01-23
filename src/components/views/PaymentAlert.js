@@ -11,7 +11,7 @@ export class PaymentAlert extends LitElement {
         input {
             user-select: text !important;
             -webkit-user-select: text !important;
-            cursor: text !important;
+
         }
 
         :host {
@@ -258,7 +258,7 @@ export class PaymentAlert extends LitElement {
             border-radius: 8px;
             font-size: 13px;
             font-weight: 600;
-            cursor: pointer;
+
             transition: all 0.2s ease;
             border: none;
             display: flex;
@@ -320,7 +320,7 @@ export class PaymentAlert extends LitElement {
             border: none;
             color: rgba(255, 255, 255, 0.5);
             font-size: 20px;
-            cursor: pointer;
+
             padding: 4px;
             line-height: 1;
             border-radius: 4px;
@@ -374,7 +374,7 @@ export class PaymentAlert extends LitElement {
             border-radius: 8px;
             font-size: 12px;
             font-weight: 600;
-            cursor: pointer;
+
             transition: all 0.2s ease;
             display: inline-flex;
             align-items: center;

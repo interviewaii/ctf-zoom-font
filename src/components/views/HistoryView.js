@@ -41,7 +41,7 @@ export class HistoryView extends LitElement {
             font-weight: 600;
             font-size: 15px;
             padding: 10px 22px;
-            cursor: pointer;
+
             transition: all 0.2s ease;
         }
 
@@ -101,7 +101,7 @@ export class HistoryView extends LitElement {
             border: 1.5px solid var(--card-border);
             border-radius: 12px;
             padding: 12px;
-            cursor: pointer;
+
             transition: all 0.2s ease;
         }
 
@@ -192,7 +192,7 @@ export class HistoryView extends LitElement {
             border-radius: 8px;
             font-size: 12px;
             font-weight: 500;
-            cursor: pointer;
+
             display: flex;
             align-items: center;
             gap: 6px;
@@ -433,7 +433,7 @@ export class HistoryView extends LitElement {
         return html`
             <div class="sessions-list">
                 ${this.sessions.map(
-                    session => html`
+            session => html`
                         <div class="session-item" @click=${() => this.handleSessionClick(session)}>
                             <div class="session-header">
                                 <div class="session-date">${this.formatDate(session.timestamp)}</div>
@@ -442,7 +442,7 @@ export class HistoryView extends LitElement {
                             <div class="session-preview">${this.getSessionPreview(session)}</div>
                         </div>
                     `
-                )}
+        )}
             </div>
         `;
     }
@@ -502,10 +502,10 @@ export class HistoryView extends LitElement {
             </div>
             <div class="conversation-view">
                 ${messages.length > 0
-                    ? messages.map(message => html`
+                ? messages.map(message => html`
                         <div class="message ${message.type}" .innerHTML=${window.marked ? window.marked.parse(message.content) : message.content}></div>
                     `)
-                    : html`<div class="empty-state">No conversation data available</div>`}
+                : html`<div class="empty-state">No conversation data available</div>`}
             </div>
         `;
     }
