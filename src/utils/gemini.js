@@ -1,35 +1,52 @@
-const { GoogleGenAI } = require('@google/genai');
+require('dotenv').config();
+const { GoogleGenAI, Modality } = require('@google/genai');
 const { BrowserWindow, ipcMain } = require('electron');
 const { spawn } = require('child_process');
 const { saveDebugAudio } = require('../audioUtils');
 const { getSystemPrompt } = require('./prompts');
 
-// API Keys for rotation
-const API_KEYS = [
-    'AIzaSyBivEvTpvGpZJgqlHyU3-7hQDexi7cow6s',
-    'AIzaSyDin5_72rCSSjCHw93DejGfZLt783iUEe0',
-    'AIzaSyCHjyKxKLGP1NEaah3oyU2t64LG6b8BMMQ',
-    'AIzaSyBd6PruB7A-x6yG9XGFU3HklgZdlzjMt9M'
-];
-let currentKeyIndex = 0;
-
 // Conversation tracking variables
 let currentSessionId = null;
 let currentTranscription = '';
-let lastRequestTime = null;
-let isFirstChunk = true;
 let conversationHistory = [];
+let screenAnalysisHistory = [];
+let currentProfile = null;
+let currentCustomPrompt = null;
 let isInitializingSession = false;
+let currentResponseId = 0; // Track active response turn for race condition
+let geminiStartTime = null;
+let geminiPrompt = '';
+let isProcessingResponse = false; // Track if we are currently receiving a response
+let lastResponseTime = 0; // Prevent double responses within a short window
+
+let activeSession = null; // Store active session reference
+let voiceTimeout = null; // Global voice timeout for silence detection
+let settingsCache = {}; // Cache for settings to avoid slow IPC/localStorage lookups
+let isWaitingForResponse = false; // Lock to prevent multiple triggers for the same transcription
+let lastTriggeredTranscription = ''; // Track last sent text to avoid duplicates
+
+function formatSpeakerResults(results) {
+    let text = '';
+    for (const result of results) {
+        if (result.transcript) {
+            text += result.transcript + ' ';
+        }
+    }
+    return text.trim();
+}
+
+module.exports.formatSpeakerResults = formatSpeakerResults;
 
 // Audio capture variables
 let systemAudioProc = null;
 let messageBuffer = '';
 
-// Reconnection tracking variables
-let reconnectionAttempts = 0;
-let maxReconnectionAttempts = 3;
-let reconnectionDelay = 500; // Reduced to 500ms for faster recovery
-let lastSessionParams = null;
+// Reconnection variables
+let isUserClosing = false;
+let sessionParams = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 3;
+const RECONNECT_DELAY = 2000;
 
 function sendToRenderer(channel, data) {
     const windows = BrowserWindow.getAllWindows();
@@ -38,12 +55,61 @@ function sendToRenderer(channel, data) {
     }
 }
 
+// Fast Trigger - manually trigger response after silence
+async function triggerGeminiResponse(transcription) {
+    if (!transcription || transcription.trim().length === 0) return;
+
+    // Only check if we're ACTIVELY getting a response from Gemini (text streaming)
+    if (isProcessingResponse) {
+        return; // Don't interrupt while AI is talking
+    }
+
+    if (activeSession) {
+        try {
+            isWaitingForResponse = true;
+            lastTriggeredTranscription = transcription.trim();
+            geminiPrompt = transcription;
+            lastResponseTime = Date.now();
+            console.log(`⚡ [FAST TRIGGER] Sending: "${transcription.substring(0, 50)}..."`);
+            await activeSession.sendRealtimeInput({ text: transcription.trim() });
+        } catch (err) {
+            console.error('❌ [FAST TRIGGER] Failed:', err);
+            isWaitingForResponse = false;
+        }
+    }
+}
+
+// Build context message for session restoration
+function buildContextMessage() {
+    const lastTurns = conversationHistory.slice(-20);
+    const validTurns = lastTurns.filter(turn => turn.transcription?.trim() && turn.ai_response?.trim());
+
+    if (validTurns.length === 0) return null;
+
+    const contextLines = validTurns.map(turn =>
+        `[Interviewer]: ${turn.transcription.trim()}\n[Your answer]: ${turn.ai_response.trim()}`
+    );
+
+    return `Session reconnected. Here's the conversation so far:\n\n${contextLines.join('\n\n')}\n\nContinue from here.`;
+}
+
 // Conversation management functions
-function initializeNewSession() {
+function initializeNewSession(profile = null, customPrompt = null) {
     currentSessionId = Date.now().toString();
     currentTranscription = '';
     conversationHistory = [];
-    console.log('New conversation session started:', currentSessionId);
+    screenAnalysisHistory = [];
+    currentProfile = profile;
+    currentCustomPrompt = customPrompt;
+    console.log('New conversation session started:', currentSessionId, 'profile:', profile);
+
+    if (profile) {
+        sendToRenderer('save-session-context', {
+            sessionId: currentSessionId,
+            profile: profile,
+            customPrompt: customPrompt || ''
+        });
+    }
 }
 
 function saveConversationTurn(transcription, aiResponse) {
@@ -60,11 +126,34 @@ function saveConversationTurn(transcription, aiResponse) {
     conversationHistory.push(conversationTurn);
     console.log('Saved conversation turn:', conversationTurn);
 
-    // Send to renderer to save in IndexedDB
     sendToRenderer('save-conversation-turn', {
         sessionId: currentSessionId,
         turn: conversationTurn,
         fullHistory: conversationHistory,
+    });
+}
+
+function saveScreenAnalysis(prompt, response, model) {
+    if (!currentSessionId) {
+        initializeNewSession();
+    }
+
+    const analysisEntry = {
+        timestamp: Date.now(),
+        prompt: prompt,
+        response: response.trim(),
+        model: model
+    };
+
+    screenAnalysisHistory.push(analysisEntry);
+    console.log('Saved screen analysis:', analysisEntry);
+
+    sendToRenderer('save-screen-analysis', {
+        sessionId: currentSessionId,
+        analysis: analysisEntry,
+        fullHistory: screenAnalysisHistory,
+        profile: currentProfile,
+        customPrompt: currentCustomPrompt
     });
 }
 
@@ -75,670 +164,370 @@ function getCurrentSessionData() {
     };
 }
 
-async function sendReconnectionContext() {
-    if (!global.geminiSessionRef?.current || conversationHistory.length === 0) {
-        return;
-    }
-
-    try {
-        // Gather all transcriptions from the conversation history
-        const transcriptions = conversationHistory
-            .map(turn => turn.transcription)
-            .filter(transcription => transcription && transcription.trim().length > 0)
-            .slice(-5); // Only send last 5 for speed
-
-        if (transcriptions.length === 0) {
-            return;
-        }
-
-        // Create the context message
-        const contextMessage = `Till now all these questions were asked in the interview, answer the last one please:\n\n${transcriptions.join('\n')}`;
-
-        console.log('Sending reconnection context with', transcriptions.length, 'previous questions');
-
-        // Send the context message to the new session
-        lastRequestTime = Date.now();
-        isFirstChunk = true;
-        await global.geminiSessionRef.current.sendRealtimeInput({
-            text: contextMessage,
-        });
-    } catch (error) {
-        console.error('Error sending reconnection context:', error);
-    }
-}
-
 async function getEnabledTools() {
     const tools = [];
-
-    // Check if Google Search is enabled (default: false for speed)
     const googleSearchEnabled = await getStoredSetting('googleSearchEnabled', 'false');
-    console.log('Google Search enabled:', googleSearchEnabled);
-
     if (googleSearchEnabled === 'true') {
         tools.push({ googleSearch: {} });
-        console.log('⚠️ WARNING: Google Search is ENABLED. This will significantly SLOW DOWN responses.');
-    } else {
-        console.log('Google Search tool disabled (Fast Mode)');
     }
-
     return tools;
 }
 
+async function getApiKey() {
+    if (process.env.GEMINI_API_KEY) {
+        return process.env.GEMINI_API_KEY;
+    }
+    const storedKey = await getStoredSetting('apiKey', '');
+    if (storedKey) return storedKey;
+    return 'AIzaSyCVeM0WTrPXhyibT1Qy2iAjC0QK4aM5dAY';
+}
+
 async function getStoredSetting(key, defaultValue) {
+    if (settingsCache[key] !== undefined) return settingsCache[key];
     try {
         const windows = BrowserWindow.getAllWindows();
         if (windows.length > 0) {
-            // Removed delay for maximum speed
-
-            // Try to get setting from renderer process localStorage
             const value = await windows[0].webContents.executeJavaScript(`
                 (function() {
                     try {
-                        if (typeof localStorage === 'undefined') {
-                            console.log('localStorage not available yet for ${key}');
-                            return '${defaultValue}';
-                        }
-                        const stored = localStorage.getItem('${key}');
-                        console.log('Retrieved setting ${key}:', stored);
-                        return stored || '${defaultValue}';
+                        if (typeof localStorage === 'undefined') return '${defaultValue}';
+                        return localStorage.getItem('${key}') || '${defaultValue}';
                     } catch (e) {
-                        console.error('Error accessing localStorage for ${key}:', e);
                         return '${defaultValue}';
                     }
                 })()
             `);
+            settingsCache[key] = value;
             return value;
         }
     } catch (error) {
-        console.error('Error getting stored setting for', key, ':', error.message);
+        console.error('Error getting stored setting:', error.message);
     }
-    console.log('Using default value for', key, ':', defaultValue);
     return defaultValue;
 }
 
-async function attemptReconnection() {
-    if (!lastSessionParams || reconnectionAttempts >= maxReconnectionAttempts) {
-        console.log('Max reconnection attempts reached or no session params stored');
-        sendToRenderer('update-status', 'Session closed');
-        return false;
-    }
-
-    reconnectionAttempts++;
-    console.log(`Attempting reconnection ${reconnectionAttempts}/${maxReconnectionAttempts}...`);
-
-    // Wait before attempting reconnection
-    await new Promise(resolve => setTimeout(resolve, reconnectionDelay));
-
-    try {
-        const session = await initializeGeminiSession(
-            lastSessionParams.apiKey,
-            lastSessionParams.customPrompt,
-            lastSessionParams.profile,
-            lastSessionParams.language,
-            true // isReconnection flag
-        );
-
-        if (session && global.geminiSessionRef) {
-            global.geminiSessionRef.current = session;
-            reconnectionAttempts = 0; // Reset counter on successful reconnection
-            console.log('Live session reconnected');
-
-            // Send context message with previous transcriptions
-            await sendReconnectionContext();
-
-            return true;
-        }
-    } catch (error) {
-        console.error(`Reconnection attempt ${reconnectionAttempts} failed:`, error);
-    }
-
-    // If this attempt failed, try again
-    if (reconnectionAttempts < maxReconnectionAttempts) {
-        return attemptReconnection();
-    } else {
-        console.log('All reconnection attempts failed');
-        sendToRenderer('update-status', 'Session closed');
-        return false;
-    }
-}
-
-async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'interview', language = 'en-US', isReconnection = false) {
-    if (isInitializingSession) {
-        console.log('Session initialization already in progress');
-        return false;
-    }
-
+async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'interview', language = 'en-US', isReconnect = false) {
+    if (isInitializingSession) return { success: false, error: 'Initialization already in progress' };
     isInitializingSession = true;
-    sendToRenderer('session-initializing', true);
 
-    // Store session parameters for reconnection (only if not already reconnecting)
-    if (!isReconnection) {
-        lastSessionParams = {
-            apiKey,
-            customPrompt,
-            profile,
-            language,
-        };
-        reconnectionAttempts = 0; // Reset counter for new session
+    // Refresh settings cache on session start
+    settingsCache = {};
+    const keysToCache = ['safetyTimeout', 'followUpDelay', 'silenceTrigger', 'googleSearchEnabled', 'apiKey'];
+    for (const key of keysToCache) {
+        await getStoredSetting(key, '');
     }
 
-    // Use rotated API key if none provided or if we want to load balance
-    const effectiveApiKey = apiKey || API_KEYS[currentKeyIndex];
-    console.log(`Using API Key index: ${currentKeyIndex}`);
+    if (!apiKey) {
+        apiKey = await getStoredSetting('apiKey', '');
+    }
+
+    if (!apiKey) {
+        isInitializingSession = false;
+        return { success: false, error: 'No API key configured.' };
+    }
+
+    if (activeSession) {
+        try { await activeSession.close(); } catch (e) { }
+        activeSession = null;
+    }
+
+    if (!isReconnect) {
+        sendToRenderer('session-initializing', true);
+        sessionParams = { apiKey, customPrompt, profile, language };
+        reconnectAttempts = 0;
+        initializeNewSession(profile, customPrompt);
+    }
 
     const client = new GoogleGenAI({
         vertexai: false,
-        apiKey: effectiveApiKey,
+        apiKey: apiKey,
+        httpOptions: { apiVersion: 'v1alpha' },
     });
 
-    // Get enabled tools first to determine Google Search status
     const enabledTools = await getEnabledTools();
-    const googleSearchEnabled = enabledTools.some(tool => tool.googleSearch);
-
-    const systemPrompt = getSystemPrompt(profile, customPrompt, googleSearchEnabled);
-
-    // Initialize new conversation session (only if not reconnecting)
-    if (!isReconnection) {
-        initializeNewSession();
-    }
+    const systemPrompt = getSystemPrompt(profile, customPrompt, enabledTools.some(t => t.googleSearch));
 
     try {
-        console.log('Initializing Gemini session with model: gemini-2.0-flash-exp');
-        const keyToMask = effectiveApiKey || 'undefined';
-        const maskedKey = keyToMask !== 'undefined' ? `${keyToMask.substring(0, 4)}...${keyToMask.substring(keyToMask.length - 4)}` : 'undefined';
-        console.log('API Key (masked):', maskedKey);
-
-        if (!client.live) {
-            console.error('client.live is undefined. Check @google/genai version.');
-            if (client.aio && client.aio.live) {
-                console.log('Found client.aio.live, using that instead.');
-                // Adjust if necessary, but for now just log it.
-            }
-        }
-
         const session = await client.live.connect({
             model: 'gemini-2.0-flash-exp',
             callbacks: {
                 onopen: function () {
-                    console.log('Gemini Live session opened successfully');
+                    console.log('Gemini Live session connected!');
                     sendToRenderer('update-status', 'Live session connected');
                 },
                 onmessage: function (message) {
-                    // console.log('----------------', JSON.stringify(message, null, 2));
+                    // console.log('📥 [GEMINI MESSAGE]', JSON.stringify(message, null, 2));
 
-                    // Handle transcription input
-                    if (message.serverContent?.inputTranscription?.text) {
-                        console.log('🎤 Transcription:', message.serverContent.inputTranscription.text);
-                        currentTranscription += message.serverContent.inputTranscription.text;
+                    if (message.serverContent?.inputTranscription?.results) {
+                        const newPart = formatSpeakerResults(message.serverContent.inputTranscription.results);
+                        if (newPart && newPart.trim()) {
+                            // ✅ ACCUMULATE properly - build the full sentence from fragments
+                            if (!currentTranscription.endsWith(newPart)) {
+                                currentTranscription += (currentTranscription ? ' ' : '') + newPart;
+                            }
+                            console.log(`✅ [VOICE INPUT] "${currentTranscription}"`);
+                            sendToRenderer('live-transcription', { text: currentTranscription });
+                            // ⚡ TURN-BASED: No manual triggers here. Wait for turnComplete.
+                        }
+                    } else if (message.serverContent?.inputTranscription?.text) {
+                        const text = message.serverContent.inputTranscription.text;
+                        if (text.trim() !== '') {
+                            // ✅ ACCUMULATE properly
+                            if (!currentTranscription.endsWith(text.trim())) {
+                                currentTranscription += (currentTranscription ? ' ' : '') + text.trim();
+                            }
+                            console.log(`✅ [VOICE INPUT] "${currentTranscription}"`);
+                            sendToRenderer('live-transcription', { text: currentTranscription });
+                            // ⚡ TURN-BASED: No manual triggers here. Wait for turnComplete.
+                        }
                     }
 
-                    // Handle AI model response
                     if (message.serverContent?.modelTurn?.parts) {
-                        let timingPrefix = '';
-                        if (isFirstChunk && lastRequestTime) {
-                            const duration = (Date.now() - lastRequestTime) / 1000;
-                            const durationStr = duration.toFixed(1);
-                            sendToRenderer('response-time', durationStr);
-                            timingPrefix = `[${durationStr}s] `; // Prepend timing to the first chunk
-                            isFirstChunk = false;
-                        }
-                        for (const part of message.serverContent.modelTurn.parts) {
+                        const parts = message.serverContent.modelTurn.parts;
+                        for (const part of parts) {
                             if (part.text) {
-                                const fullText = timingPrefix + part.text;
-                                timingPrefix = '';
-                                messageBuffer += fullText;
+                                const text = part.text;
+                                if (text.trim() === '') continue;
 
-                                sendToRenderer('update-response-stream', fullText);
+                                const isNewResponse = !isProcessingResponse;
+                                if (isNewResponse) {
+                                    isProcessingResponse = true;
+                                    isWaitingForResponse = false; // Reset lock when AI starts talking
+                                    lastResponseTime = Date.now();
+                                    geminiStartTime = Date.now();
+                                    messageBuffer = text;
+                                    console.log(`🚀 [GEMINI] Starting new response...`);
+                                } else {
+                                    messageBuffer += text;
+                                }
+                                sendToRenderer(isNewResponse ? 'new-response' : 'update-response', { text: messageBuffer, source: 'gemini' });
                             }
                         }
                     }
 
                     if (message.serverContent?.generationComplete) {
-                        console.log('Generation complete, sending response:', messageBuffer.substring(0, 50) + '...');
-                        sendToRenderer('update-response', messageBuffer);
-
-                        // Save conversation turn when we have both transcription and AI response
-                        if (currentTranscription && messageBuffer) {
-                            saveConversationTurn(currentTranscription, messageBuffer);
-                            currentTranscription = ''; // Reset for next turn
+                        console.log('🏁 [GEMINI] Generation complete');
+                        if (messageBuffer.trim() !== '') {
+                            sendToRenderer('update-response', { text: messageBuffer, source: 'gemini' });
+                            if (currentTranscription || geminiPrompt) {
+                                saveConversationTurn(currentTranscription || geminiPrompt, messageBuffer);
+                            }
                         }
-
                         messageBuffer = '';
+                        geminiStartTime = null;
+                        isProcessingResponse = false;
+                        isWaitingForResponse = false; // Ensure lock is reset
+                        geminiPrompt = '';
+                        lastTriggeredTranscription = ''; // Clear last sent text
                     }
 
                     if (message.serverContent?.turnComplete) {
-                        // Fallback: If we have a buffer but didn't get generationComplete, send it now
-                        if (messageBuffer.length > 0) {
-                            sendToRenderer('update-response', messageBuffer);
+                        console.log('🎯 [TURN COMPLETE]');
+                        if (currentTranscription.trim().length > 0) {
+                            const transcriptToTrigger = currentTranscription;
+                            // ⚡ TRIGGER: Now that the turn is complete, send the full accumulated transcription
+                            triggerGeminiResponse(transcriptToTrigger);
 
-                            if (currentTranscription && messageBuffer) {
-                                saveConversationTurn(currentTranscription, messageBuffer);
-                                currentTranscription = '';
-                            }
-                            messageBuffer = '';
+                            geminiPrompt = currentTranscription;
+                            currentTranscription = '';
+                            sendToRenderer('live-transcription', { text: '' });
                         }
-                        sendToRenderer('update-status', 'Listening...');
-                        isFirstChunk = true;
-                        lastRequestTime = null;
+                    } else if (message.serverContent?.setupComplete) {
+                        console.log('[EVENT] Setup complete');
                     }
                 },
                 onerror: function (e) {
-                    console.error('Gemini Live session error:', e);
-                    console.error('Error message:', e.message);
-
-                    const isApiKeyError = e.message && (
-                        e.message.includes('API key not valid') ||
-                        e.message.includes('invalid API key') ||
-                        e.message.includes('authentication failed') ||
-                        e.message.includes('unauthorized')
-                    );
-
-                    if (isApiKeyError || e.message?.includes('Resource has been exhausted')) {
-                        console.log('API Key error or limit reached - rotating key');
-                        currentKeyIndex = (currentKeyIndex + 1) % API_KEYS.length;
-
-                        if (lastSessionParams && reconnectionAttempts < maxReconnectionAttempts) {
-                            setTimeout(() => attemptReconnection(), 1000);
-                        }
-                        return;
-                    }
-
+                    console.log('Session error:', e.message);
+                    isProcessingResponse = false;
+                    isWaitingForResponse = false;
                     sendToRenderer('update-status', 'Error: ' + e.message);
                 },
                 onclose: function (e) {
-                    console.log('Gemini Live session closed:', e);
-
-                    // Check if the session closed due to invalid API key
-                    const isApiKeyError =
-                        e.reason &&
-                        (e.reason.includes('API key not valid') ||
-                            e.reason.includes('invalid API key') ||
-                            e.reason.includes('authentication failed') ||
-                            e.reason.includes('unauthorized'));
-
-                    if (isApiKeyError) {
-                        console.log('Session closed due to invalid API key - stopping reconnection attempts');
-                        lastSessionParams = null; // Clear session params to prevent reconnection
-                        reconnectionAttempts = maxReconnectionAttempts; // Stop further attempts
-                        sendToRenderer('update-status', 'Session closed: Invalid API key');
+                    console.log('Session closed:', e.reason);
+                    if (global.geminiSessionRef) global.geminiSessionRef.current = null;
+                    activeSession = null;
+                    isProcessingResponse = false;
+                    isWaitingForResponse = false;
+                    if (isUserClosing) {
+                        isUserClosing = false;
+                        sendToRenderer('update-status', 'Session closed');
                         return;
                     }
-
-                    // Attempt automatic reconnection for server-side closures
-                    if (lastSessionParams && reconnectionAttempts < maxReconnectionAttempts) {
-                        console.log('Attempting automatic reconnection...');
-                        attemptReconnection();
+                    if (sessionParams && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                        setTimeout(() => { if (!activeSession && !isInitializingSession) attemptReconnect(); }, RECONNECT_DELAY);
                     } else {
                         sendToRenderer('update-status', 'Session closed');
                     }
                 },
             },
             config: {
-                responseModalities: ['TEXT'],
+                responseModalities: [Modality.TEXT],
+                outputAudioTranscription: {},
                 tools: enabledTools,
-                inputAudioTranscription: { enabled: true },
-                temperature: 0.1,
-                candidateCount: 1,
-                speechConfig: { languageCode: language },
-                systemInstruction: {
-                    parts: [{ text: systemPrompt }],
-                },
+                inputAudioTranscription: { model: 'default', enableAutomaticPunctuation: true },
+                contextWindowCompression: { slidingWindow: {} },
+                speechConfig: { languageCode: 'en-US', alternativeLanguageCodes: [] },
+                systemInstruction: { parts: [{ text: systemPrompt }] },
             },
         });
 
-        console.log('Gemini session object created:', !!session);
+        activeSession = session;
+        if (global.geminiSessionRef) global.geminiSessionRef.current = session;
         isInitializingSession = false;
-        sendToRenderer('session-initializing', false);
-        return session;
+        if (!isReconnect) sendToRenderer('session-initializing', false);
+        return { success: true, session: session };
     } catch (error) {
-        console.error('Failed to initialize Gemini session (catch block):', error);
-
-        // Rotate key and retry if it's an API key error
-        const isApiKeyError = error.message && (
-            error.message.includes('API key not valid') ||
-            error.message.includes('invalid API key') ||
-            error.message.includes('authentication failed') ||
-            error.message.includes('unauthorized') ||
-            error.message.includes('Resource has been exhausted')
-        );
-
-        if (isApiKeyError) {
-            console.log('API Key error in catch block - rotating key and retrying');
-            currentKeyIndex = (currentKeyIndex + 1) % API_KEYS.length;
-            isInitializingSession = false;
-
-            if (lastSessionParams && reconnectionAttempts < maxReconnectionAttempts) {
-                return attemptReconnection();
-            }
-        }
-
+        console.error('Failed to initialize Gemini session:', error);
         isInitializingSession = false;
-        sendToRenderer('session-initializing', false);
-        sendToRenderer('update-status', 'Error: ' + error.message);
-        return null;
+        activeSession = null;
+        if (global.geminiSessionRef) global.geminiSessionRef.current = null;
+        if (!isReconnect) sendToRenderer('session-initializing', false);
+        return { success: false, error: error.message };
     }
+}
+
+async function attemptReconnect() {
+    reconnectAttempts++;
+    messageBuffer = '';
+    currentTranscription = '';
+    sendToRenderer('update-status', `Reconnecting... (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+    await new Promise(resolve => setTimeout(resolve, RECONNECT_DELAY));
+    try {
+        const result = await initializeGeminiSession(sessionParams.apiKey, sessionParams.customPrompt, sessionParams.profile, sessionParams.language, true);
+        if (result.success && result.session) {
+            const contextMessage = buildContextMessage();
+            if (contextMessage) await result.session.sendRealtimeInput({ text: contextMessage });
+            sendToRenderer('update-status', 'Reconnected! Listening...');
+            return true;
+        }
+    } catch (error) { console.error('Reconnect failed:', error); }
+    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) return attemptReconnect();
+    sendToRenderer('reconnect-failed', { message: 'Max reconnection attempts reached.' });
+    return false;
 }
 
 function killExistingSystemAudioDump() {
     return new Promise(resolve => {
-        console.log('Checking for existing SystemAudioDump processes...');
-
-        // Kill any existing SystemAudioDump processes
-        const killProc = spawn('pkill', ['-f', 'SystemAudioDump'], {
-            stdio: 'ignore',
-        });
-
-        killProc.on('close', code => {
-            if (code === 0) {
-                console.log('Killed existing SystemAudioDump processes');
-            } else {
-                console.log('No existing SystemAudioDump processes found');
-            }
-            resolve();
-        });
-
-        killProc.on('error', err => {
-            console.log('Error checking for existing processes (this is normal):', err.message);
-            resolve();
-        });
-
-        // Timeout after 2 seconds
-        setTimeout(() => {
-            killProc.kill();
-            resolve();
-        }, 2000);
+        const killProc = spawn('pkill', ['-f', 'SystemAudioDump'], { stdio: 'ignore' });
+        killProc.on('close', () => resolve());
+        killProc.on('error', () => resolve());
+        setTimeout(() => { killProc.kill(); resolve(); }, 2000);
     });
 }
 
-async function startMacOSAudioCapture(geminiSessionRef) {
+async function startMacOSAudioCapture() {
     if (process.platform !== 'darwin') return false;
-
-    // Kill any existing SystemAudioDump processes first
     await killExistingSystemAudioDump();
-
-    console.log('Starting macOS audio capture with SystemAudioDump...');
-
     const { app } = require('electron');
     const path = require('path');
-
-    let systemAudioPath;
-    if (app.isPackaged) {
-        systemAudioPath = path.join(process.resourcesPath, 'SystemAudioDump');
-    } else {
-        systemAudioPath = path.join(__dirname, '../assets', 'SystemAudioDump');
-    }
-
-    console.log('SystemAudioDump path:', systemAudioPath);
-
-    systemAudioProc = spawn(systemAudioPath, [], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    if (!systemAudioProc.pid) {
-        console.error('Failed to start SystemAudioDump');
-        return false;
-    }
-
-    console.log('SystemAudioDump started with PID:', systemAudioProc.pid);
-
-    const CHUNK_DURATION = 0.1;
-    const SAMPLE_RATE = 24000;
-    const BYTES_PER_SAMPLE = 2;
-    const CHANNELS = 2;
-    const CHUNK_SIZE = SAMPLE_RATE * BYTES_PER_SAMPLE * CHANNELS * CHUNK_DURATION;
-
-    let audioBuffer = Buffer.alloc(0);
-
+    let systemAudioPath = app.isPackaged ? path.join(process.resourcesPath, 'SystemAudioDump') : path.join(__dirname, '../assets', 'SystemAudioDump');
+    systemAudioProc = spawn(systemAudioPath, [], { stdio: ['ignore', 'pipe', 'pipe'] });
+    if (!systemAudioProc.pid) return false;
     systemAudioProc.stdout.on('data', data => {
-        audioBuffer = Buffer.concat([audioBuffer, data]);
-
-        while (audioBuffer.length >= CHUNK_SIZE) {
-            const chunk = audioBuffer.slice(0, CHUNK_SIZE);
-            audioBuffer = audioBuffer.slice(CHUNK_SIZE);
-
-            const monoChunk = CHANNELS === 2 ? convertStereoToMono(chunk) : chunk;
-            const base64Data = monoChunk.toString('base64');
-            sendAudioToGemini(base64Data, geminiSessionRef);
-
-            if (process.env.DEBUG_AUDIO) {
-                console.log(`Processed audio chunk: ${chunk.length} bytes`);
-                saveDebugAudio(monoChunk, 'system_audio');
-            }
-        }
-
-        const maxBufferSize = SAMPLE_RATE * BYTES_PER_SAMPLE * 1;
-        if (audioBuffer.length > maxBufferSize) {
-            audioBuffer = audioBuffer.slice(-maxBufferSize);
-        }
+        if (activeSession) activeSession.sendRealtimeInput({ audio: { data: data.toString('base64'), mimeType: 'audio/pcm;rate=24000' } });
     });
-
-    systemAudioProc.stderr.on('data', data => {
-        console.error('SystemAudioDump stderr:', data.toString());
-    });
-
-    systemAudioProc.on('close', code => {
-        console.log('SystemAudioDump process closed with code:', code);
-        systemAudioProc = null;
-    });
-
-    systemAudioProc.on('error', err => {
-        console.error('SystemAudioDump process error:', err);
-        systemAudioProc = null;
-    });
-
     return true;
-}
-
-function convertStereoToMono(stereoBuffer) {
-    const samples = stereoBuffer.length / 4;
-    const monoBuffer = Buffer.alloc(samples * 2);
-
-    for (let i = 0; i < samples; i++) {
-        const leftSample = stereoBuffer.readInt16LE(i * 4);
-        monoBuffer.writeInt16LE(leftSample, i * 2);
-    }
-
-    return monoBuffer;
 }
 
 function stopMacOSAudioCapture() {
     if (systemAudioProc) {
-        console.log('Stopping SystemAudioDump...');
-        systemAudioProc.kill('SIGTERM');
+        systemAudioProc.kill();
         systemAudioProc = null;
     }
 }
 
-async function sendAudioToGemini(base64Data, geminiSessionRef) {
-    if (!geminiSessionRef.current) return;
+function getAvailableModel() { return 'gemini-2.0-flash-exp'; }
 
+async function sendImageToGeminiHttp(base64Data, prompt) {
+    const thisResponseId = ++currentResponseId;
+    const model = getAvailableModel();
+    const apiKey = await getApiKey();
+    if (!apiKey) return { success: false, error: 'No API key configured' };
     try {
-        // process.stdout.write('.');
-        await geminiSessionRef.current.sendRealtimeInput({
-            audio: {
-                data: base64Data,
-                mimeType: 'audio/pcm;rate=24000',
-            },
-        });
+        const ai = new GoogleGenAI({ apiKey: apiKey });
+        const contents = [{ inlineData: { mimeType: 'image/jpeg', data: base64Data } }, { text: prompt }];
+        const response = await ai.models.generateContentStream({ model: model, contents: contents });
+        let fullText = '';
+        let isFirst = true;
+        for await (const chunk of response) {
+            if (currentResponseId !== thisResponseId) break;
+            const chunkText = chunk.text;
+            if (chunkText) {
+                fullText += chunkText;
+                sendToRenderer(isFirst ? 'new-response' : 'update-response', { text: `Q: ${prompt}\n\n[Gemini...] ${fullText}`, source: 'gemini' });
+                isFirst = false;
+            }
+        }
+        if (currentResponseId === thisResponseId) {
+            const finalText = `Q: ${prompt}\n\n${fullText}`;
+            sendToRenderer('update-response', { text: finalText, source: 'gemini' });
+            saveScreenAnalysis(prompt, finalText, model);
+            return { success: true, text: finalText, model: model };
+        }
+        return { success: true, text: fullText, model: model };
     } catch (error) {
-        console.error('Error sending audio to Gemini:', error);
+        console.error('Error sending image:', error);
+        return { success: false, error: error.message };
     }
 }
 
 function setupGeminiIpcHandlers(geminiSessionRef) {
-    // Store the geminiSessionRef globally for reconnection access
     global.geminiSessionRef = geminiSessionRef;
-
-    ipcMain.handle('initialize-gemini', async (event, profile = 'interview', language = 'en-US', customPrompt = '', apiKey = null) => {
-        console.log('IPC initialize-gemini called with:', { profile, language, hasCustomPrompt: !!customPrompt, hasApiKey: !!apiKey });
-        const session = await initializeGeminiSession(apiKey, customPrompt, profile, language);
-        if (session) {
-            geminiSessionRef.current = session;
-            return true;
-        }
-        return false;
+    ipcMain.handle('initialize-gemini', async (event, apiKey, customPrompt, profile, language) => {
+        const result = await initializeGeminiSession(apiKey, customPrompt, profile, language);
+        return { success: result.success, error: result.error };
     });
-
     ipcMain.handle('send-audio-content', async (event, { data, mimeType }) => {
-        if (!geminiSessionRef.current) return { success: false, error: 'No active Gemini session' };
-        try {
-            // process.stdout.write('.');
-            if (isFirstChunk && !lastRequestTime) {
-                lastRequestTime = Date.now();
-            }
-            await geminiSessionRef.current.sendRealtimeInput({
-                audio: { data: data, mimeType: mimeType },
-            });
-            return { success: true };
-        } catch (error) {
-            console.error('Error sending audio:', error);
-            return { success: false, error: error.message };
+        if (!activeSession) {
+            if (isInitializingSession) return { success: false };
+            const apiKey = await getApiKey();
+            if (apiKey) initializeGeminiSession(apiKey);
         }
-    });
-
-    ipcMain.handle('send-image-content', async (event, { data, debug }) => {
-        if (!geminiSessionRef.current) return { success: false, error: 'No active Gemini session' };
-
+        if (!activeSession) return { success: false };
         try {
-            if (!data || typeof data !== 'string') {
-                console.error('Invalid image data received');
-                return { success: false, error: 'Invalid image data' };
-            }
-
-            const buffer = Buffer.from(data, 'base64');
-
-            if (buffer.length < 1000) {
-                console.error(`Image buffer too small: ${buffer.length} bytes`);
-                return { success: false, error: 'Image buffer too small' };
-            }
-
-            // process.stdout.write('!');
-            lastRequestTime = Date.now();
-            isFirstChunk = true;
-            await geminiSessionRef.current.sendRealtimeInput({
-                media: { data: data, mimeType: 'image/jpeg' },
-            });
-
+            await activeSession.sendRealtimeInput({ audio: { data: data, mimeType: mimeType } });
             return { success: true };
-        } catch (error) {
-            console.error('Error sending image:', error);
-            return { success: false, error: error.message };
-        }
+        } catch (e) { return { success: false }; }
     });
-
+    ipcMain.handle('send-mic-audio-content', async (event, { data, mimeType }) => {
+        if (!activeSession) {
+            if (isInitializingSession) return { success: false };
+            const apiKey = await getApiKey();
+            if (apiKey) initializeGeminiSession(apiKey);
+        }
+        if (!activeSession) return { success: false };
+        try {
+            await activeSession.sendRealtimeInput({ audio: { data: data, mimeType: mimeType } });
+            return { success: true };
+        } catch (e) { return { success: false }; }
+    });
+    ipcMain.handle('send-image-content', async (event, { data, prompt }) => {
+        return await sendImageToGeminiHttp(data, prompt);
+    });
     ipcMain.handle('send-text-message', async (event, text) => {
-        if (!geminiSessionRef.current) return { success: false, error: 'No active Gemini session' };
-
+        if (!activeSession) {
+            const apiKey = await getApiKey();
+            if (apiKey) await initializeGeminiSession(apiKey);
+        }
+        if (!activeSession) return { success: false };
         try {
-            if (!text || typeof text !== 'string' || text.trim().length === 0) {
-                return { success: false, error: 'Invalid text message' };
-            }
-
-            console.log('Sending text message:', text);
-            lastRequestTime = Date.now();
-            isFirstChunk = true;
-            await geminiSessionRef.current.sendRealtimeInput({ text: text.trim() });
+            geminiStartTime = Date.now();
+            geminiPrompt = text;
+            await activeSession.sendRealtimeInput({ text: text.trim() });
             return { success: true };
-        } catch (error) {
-            console.error('Error sending text:', error);
-            return { success: false, error: error.message };
-        }
+        } catch (e) { return { success: false }; }
     });
-
-    ipcMain.handle('start-macos-audio', async event => {
-        if (process.platform !== 'darwin') {
-            return {
-                success: false,
-                error: 'macOS audio capture only available on macOS',
-            };
-        }
-
-        try {
-            const success = await startMacOSAudioCapture(geminiSessionRef);
-            return { success };
-        } catch (error) {
-            console.error('Error starting macOS audio capture:', error);
-            return { success: false, error: error.message };
-        }
+    ipcMain.on('update-setting-cache', (event, { key, value }) => {
+        settingsCache[key] = value;
+        console.log(`⚙️ [CACHE] Updated ${key} = ${value}`);
     });
-
-    ipcMain.handle('stop-macos-audio', async event => {
-        try {
-            stopMacOSAudioCapture();
-            return { success: true };
-        } catch (error) {
-            console.error('Error stopping macOS audio capture:', error);
-            return { success: false, error: error.message };
-        }
-    });
-
-    ipcMain.handle('close-session', async event => {
-        try {
-            stopMacOSAudioCapture();
-
-            // Clear session params to prevent reconnection when user closes session
-            lastSessionParams = null;
-
-            // Cleanup any pending resources and stop audio/video capture
-            if (geminiSessionRef.current) {
-                await geminiSessionRef.current.close();
-                geminiSessionRef.current = null;
-            }
-
-            return { success: true };
-        } catch (error) {
-            console.error('Error closing session:', error);
-            return { success: false, error: error.message };
-        }
-    });
-
-    // Conversation history IPC handlers
-    ipcMain.handle('get-current-session', async event => {
-        try {
-            return { success: true, data: getCurrentSessionData() };
-        } catch (error) {
-            console.error('Error getting current session:', error);
-            return { success: false, error: error.message };
-        }
-    });
-
-    ipcMain.handle('start-new-session', async event => {
-        try {
-            initializeNewSession();
-            return { success: true, sessionId: currentSessionId };
-        } catch (error) {
-            console.error('Error starting new session:', error);
-            return { success: false, error: error.message };
-        }
-    });
-
-    ipcMain.handle('update-google-search-setting', async (event, enabled) => {
-        try {
-            console.log('Google Search setting updated to:', enabled);
-            // The setting is already saved in localStorage by the renderer
-            // This is just for logging/confirmation
-            return { success: true };
-        } catch (error) {
-            console.error('Error updating Google Search setting:', error);
-            return { success: false, error: error.message };
-        }
-    });
+    ipcMain.handle('start-macos-audio', async () => { return { success: await startMacOSAudioCapture() }; });
+    ipcMain.handle('stop-macos-audio', async () => { stopMacOSAudioCapture(); return { success: true }; });
 }
 
 module.exports = {
     initializeGeminiSession,
-    getEnabledTools,
-    getStoredSetting,
-    sendToRenderer,
-    initializeNewSession,
-    saveConversationTurn,
-    getCurrentSessionData,
-    sendReconnectionContext,
-    killExistingSystemAudioDump,
-    startMacOSAudioCapture,
-    convertStereoToMono,
-    stopMacOSAudioCapture,
-    sendAudioToGemini,
     setupGeminiIpcHandlers,
-    attemptReconnection,
+    stopMacOSAudioCapture,
+    sendToRenderer,
 };

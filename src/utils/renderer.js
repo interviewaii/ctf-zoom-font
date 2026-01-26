@@ -8,115 +8,151 @@ let audioProcessor = null;
 let micAudioProcessor = null;
 let audioBuffer = [];
 const SAMPLE_RATE = 24000;
-const AUDIO_CHUNK_DURATION = 0.02; // seconds - extreme speed
-const BUFFER_SIZE = 1024; // Minimal buffer size for lowest possible latency (~42ms)
+const AUDIO_CHUNK_DURATION = 0.1; // seconds
+const BUFFER_SIZE = 4096; // Increased buffer size for smoother audio
 
 let hiddenVideo = null;
 let offscreenCanvas = null;
 let offscreenContext = null;
 let currentImageQuality = 'medium'; // Store current image quality for manual screenshots
 
+
+
 const isLinux = process.platform === 'linux';
 const isMacOS = process.platform === 'darwin';
 
-// Token tracking system for rate limiting
-let tokenTracker = {
-    tokens: [], // Array of {timestamp, count, type} objects
-    audioStartTime: null,
-
-    // Add tokens to the tracker
-    addTokens(count, type = 'image') {
-        const now = Date.now();
-        this.tokens.push({
-            timestamp: now,
-            count: count,
-            type: type,
-        });
-
-        // Clean old tokens (older than 1 minute)
-        this.cleanOldTokens();
+// ============ STORAGE API ============
+// Wrapper for direct localStorage access (IPC handlers were removed)
+const storage = {
+    // Config
+    async getConfig() {
+        const stored = localStorage.getItem('appConfig');
+        return stored ? JSON.parse(stored) : {};
+    },
+    async setConfig(config) {
+        localStorage.setItem('appConfig', JSON.stringify(config));
+        return { success: true };
+    },
+    async updateConfig(key, value) {
+        const config = await this.getConfig();
+        config[key] = value;
+        return this.setConfig(config);
     },
 
-    // Calculate image tokens based on Gemini 2.0 rules
-    calculateImageTokens(width, height) {
-        // Images ≤384px in both dimensions = 258 tokens
-        if (width <= 384 && height <= 384) {
-            return 258;
+    // Credentials
+    async getCredentials() {
+        const stored = localStorage.getItem('credentials');
+        return stored ? JSON.parse(stored) : {};
+    },
+    async setCredentials(credentials) {
+        localStorage.setItem('credentials', JSON.stringify(credentials));
+        return { success: true };
+    },
+    async getApiKey() {
+        const key = localStorage.getItem('apiKey');
+        if (key) return key;
+
+        // Hardcoded fallback
+        return 'AIzaSyCVeM0WTrPXhyibT1Qy2iAjC0QK4aM5dAY';
+    },
+    async setApiKey(apiKey) {
+        localStorage.setItem('apiKey', apiKey);
+        return { success: true };
+    },
+
+    // Preferences
+    async getPreferences() {
+        const stored = localStorage.getItem('preferences');
+        return stored ? JSON.parse(stored) : {};
+    },
+    async setPreferences(preferences) {
+        localStorage.setItem('preferences', JSON.stringify(preferences));
+        return { success: true };
+    },
+    async updatePreference(key, value) {
+        const preferences = await this.getPreferences();
+        preferences[key] = value;
+        return this.setPreferences(preferences);
+    },
+
+    // Keybinds
+    async getKeybinds() {
+        const stored = localStorage.getItem('customKeybinds');
+        return stored ? JSON.parse(stored) : null;
+    },
+    async setKeybinds(keybinds) {
+        localStorage.setItem('customKeybinds', JSON.stringify(keybinds));
+        return { success: true };
+    },
+
+    // Sessions (History)
+    async getAllSessions() {
+        const stored = localStorage.getItem('allSessions');
+        return stored ? JSON.parse(stored) : [];
+    },
+    async getSession(sessionId) {
+        const sessions = await this.getAllSessions();
+        return sessions.find(s => s.id === sessionId) || null;
+    },
+    async saveSession(sessionId, data) {
+        const sessions = await this.getAllSessions();
+        const index = sessions.findIndex(s => s.id === sessionId);
+        if (index >= 0) {
+            sessions[index] = { ...sessions[index], ...data };
+        } else {
+            sessions.push({ id: sessionId, ...data, timestamp: Date.now() });
         }
-
-        // Larger images are tiled into 768x768 chunks, each = 258 tokens
-        const tilesX = Math.ceil(width / 768);
-        const tilesY = Math.ceil(height / 768);
-        const totalTiles = tilesX * tilesY;
-
-        return totalTiles * 258;
+        localStorage.setItem('allSessions', JSON.stringify(sessions));
+        return { success: true };
+    },
+    async deleteSession(sessionId) {
+        const sessions = await this.getAllSessions();
+        const filtered = sessions.filter(s => s.id !== sessionId);
+        localStorage.setItem('allSessions', JSON.stringify(filtered));
+        return { success: true };
+    },
+    async deleteAllSessions() {
+        localStorage.removeItem('allSessions');
+        return { success: true };
     },
 
-    // Track audio tokens continuously
-    trackAudioTokens() {
-        if (!this.audioStartTime) {
-            this.audioStartTime = Date.now();
-            return;
-        }
-
-        const now = Date.now();
-        const elapsedSeconds = (now - this.audioStartTime) / 1000;
-
-        // Audio = 32 tokens per second
-        const audioTokens = Math.floor(elapsedSeconds * 32);
-
-        if (audioTokens > 0) {
-            this.addTokens(audioTokens, 'audio');
-            this.audioStartTime = now;
-        }
+    // Notes
+    async getNotes() {
+        const stored = localStorage.getItem('notes');
+        return stored ? JSON.parse(stored) : [];
     },
-
-    // Clean tokens older than 1 minute
-    cleanOldTokens() {
-        const oneMinuteAgo = Date.now() - 60 * 1000;
-        this.tokens = this.tokens.filter(token => token.timestamp > oneMinuteAgo);
+    async saveNote(note) {
+        const notes = await this.getNotes();
+        notes.push({ ...note, timestamp: Date.now() });
+        localStorage.setItem('notes', JSON.stringify(notes));
+        return { success: true };
     },
-
-    // Get total tokens in the last minute
-    getTokensInLastMinute() {
-        this.cleanOldTokens();
-        return this.tokens.reduce((total, token) => total + token.count, 0);
+    async deleteNote(noteId) {
+        const notes = await this.getNotes();
+        const filtered = notes.filter(n => n.id !== noteId);
+        localStorage.setItem('notes', JSON.stringify(filtered));
+        return { success: true };
     },
-
-    // Check if we should throttle based on settings
-    shouldThrottle() {
-        // Get rate limiting settings from localStorage
-        const throttleEnabled = localStorage.getItem('throttleTokens') === 'true';
-        if (!throttleEnabled) {
-            return false;
-        }
-
-        const maxTokensPerMin = parseInt(localStorage.getItem('maxTokensPerMin') || '1000000', 10);
-        const throttleAtPercent = parseInt(localStorage.getItem('throttleAtPercent') || '75', 10);
-
-        const currentTokens = this.getTokensInLastMinute();
-        const throttleThreshold = Math.floor((maxTokensPerMin * throttleAtPercent) / 100);
-
-        console.log(`Token check: ${currentTokens}/${maxTokensPerMin} (throttle at ${throttleThreshold})`);
-
-        return currentTokens >= throttleThreshold;
+    async clearAll() {
+        localStorage.clear();
+        return { success: true };
     },
-
-    // Reset the tracker
-    reset() {
-        this.tokens = [];
-        this.audioStartTime = null;
-    },
+    async getTodayLimits() {
+        const stored = localStorage.getItem('todayLimits');
+        return stored ? JSON.parse(stored) : { flash: { count: 0 }, flashLite: { count: 0 } };
+    }
 };
 
-// Track audio tokens every second for faster response
-setInterval(() => {
-    tokenTracker.trackAudioTokens();
-}, 1000);
+// Cache for preferences to avoid async calls in hot paths
+let preferencesCache = null;
 
-function interviewCrackerElement() {
-    return document.getElementById('interview-ai');
+async function loadPreferencesCache() {
+    preferencesCache = await storage.getPreferences();
+    return preferencesCache;
 }
+
+// Initialize preferences cache
+loadPreferencesCache();
 
 function convertFloat32ToInt16(float32Array) {
     const int16Array = new Int16Array(float32Array.length);
@@ -139,35 +175,36 @@ function arrayBufferToBase64(buffer) {
 }
 
 async function initializeGemini(profile = 'interview', language = 'en-US') {
-    // Pass profile and language first, then customPrompt, and null for apiKey to use rotation
-    const success = await ipcRenderer.invoke('initialize-gemini', profile, language, localStorage.getItem('customPrompt') || '', null);
-    if (success) {
-        interviewCrackerElement().setStatus('Live');
+    const prefs = await storage.getPreferences();
+    const apiKey = await storage.getApiKey();
+    console.log('Initializing Gemini with profile:', profile);
+    console.log('Current API Key in renderer:', apiKey ? (apiKey.substring(0, 8) + '...') : 'NONE');
+
+    const result = await ipcRenderer.invoke('initialize-gemini', apiKey, prefs.customPrompt || '', profile, language);
+
+    if (result.success) {
+        console.log('Gemini initialization successful');
+        cheatingDaddy.setStatus('Live');
     } else {
-        interviewCrackerElement().setStatus('error');
+        console.error('Gemini initialization failed:', result.error);
+        cheatingDaddy.setStatus('error');
+        cheatingDaddy.addNewResponse(`Error initializing Gemini: ${result.error}`);
     }
 }
 
 // Listen for status updates
 ipcRenderer.on('update-status', (event, status) => {
     console.log('Status update:', status);
-    interviewCrackerElement().setStatus(status);
+    cheatingDaddy.setStatus(status);
 });
 
-// Listen for responses - REMOVED: This is handled in InterviewCrackerApp.js to avoid duplicates
-// ipcRenderer.on('update-response', (event, response) => {
-//     console.log('Gemini response:', response);
-//     cheddar.e().setResponse(response);
-//     // You can add UI elements to display the response if needed
-// });
-
-async function startCapture(screenshotIntervalSeconds = 2, imageQuality = 'medium') {
+async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'medium') {
     // Store the image quality for manual screenshots
     currentImageQuality = imageQuality;
 
-    // Reset token tracker when starting new capture session
-    tokenTracker.reset();
-    console.log('🎯 Token tracker reset for new capture session');
+    // Refresh preferences cache
+    await loadPreferencesCache();
+    const audioMode = preferencesCache.audioMode || 'speaker_only';
 
     try {
         if (isMacOS) {
@@ -191,41 +228,89 @@ async function startCapture(screenshotIntervalSeconds = 2, imageQuality = 'mediu
             });
 
             console.log('macOS screen capture started - audio handled by SystemAudioDump');
-        } else if (isLinux) {
-            // Linux - use display media for screen capture and getUserMedia for microphone
-            mediaStream = await navigator.mediaDevices.getDisplayMedia({
-                video: {
-                    frameRate: 1,
-                    width: { ideal: 1920 },
-                    height: { ideal: 1080 },
-                },
-                audio: false, // Don't use system audio loopback on Linux
-            });
 
-            // Get microphone input for Linux
-            let micStream = null;
+            if (audioMode === 'mic_only' || audioMode === 'both') {
+                let micStream = null;
+                try {
+                    micStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            sampleRate: SAMPLE_RATE,
+                            channelCount: 1,
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true,
+                        },
+                        video: false,
+                    });
+                    console.log('macOS microphone capture started');
+                    setupLinuxMicProcessing(micStream);
+                } catch (micError) {
+                    console.warn('Failed to get microphone access on macOS:', micError);
+                }
+            }
+        } else if (isLinux) {
+            // Linux - use display media for screen capture and try to get system audio
             try {
-                micStream = await navigator.mediaDevices.getUserMedia({
+                // First try to get system audio via getDisplayMedia (works on newer browsers)
+                mediaStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: {
+                        frameRate: 1,
+                        width: { ideal: 1920 },
+                        height: { ideal: 1080 },
+                    },
                     audio: {
                         sampleRate: SAMPLE_RATE,
                         channelCount: 1,
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
+                        echoCancellation: false, // Don't cancel system audio
+                        noiseSuppression: false,
+                        autoGainControl: false,
                     },
-                    video: false,
                 });
 
-                console.log('Linux microphone capture started');
+                console.log('Linux system audio capture via getDisplayMedia succeeded');
 
-                // Setup audio processing for microphone on Linux
-                setupLinuxMicProcessing(micStream);
-            } catch (micError) {
-                console.warn('Failed to get microphone access on Linux:', micError);
-                // Continue without microphone if permission denied
+                // Setup audio processing for Linux system audio
+                setupLinuxSystemAudioProcessing();
+            } catch (systemAudioError) {
+                console.warn('System audio via getDisplayMedia failed, trying screen-only capture:', systemAudioError);
+
+                // Fallback to screen-only capture
+                mediaStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: {
+                        frameRate: 1,
+                        width: { ideal: 1920 },
+                        height: { ideal: 1080 },
+                    },
+                    audio: false,
+                });
             }
 
-            console.log('Linux screen capture started');
+            // Additionally get microphone input for Linux based on audio mode
+            if (audioMode === 'mic_only' || audioMode === 'both') {
+                let micStream = null;
+                try {
+                    micStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            sampleRate: SAMPLE_RATE,
+                            channelCount: 1,
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true,
+                        },
+                        video: false,
+                    });
+
+                    console.log('Linux microphone capture started');
+
+                    // Setup audio processing for microphone on Linux
+                    setupLinuxMicProcessing(micStream);
+                } catch (micError) {
+                    console.warn('Failed to get microphone access on Linux:', micError);
+                    // Continue without microphone if permission denied
+                }
+            }
+
+            console.log('Linux capture started - system audio:', mediaStream.getAudioTracks().length > 0, 'microphone mode:', audioMode);
         } else {
             // Windows - use display media with loopback for system audio
             mediaStream = await navigator.mediaDevices.getDisplayMedia({
@@ -247,6 +332,26 @@ async function startCapture(screenshotIntervalSeconds = 2, imageQuality = 'mediu
 
             // Setup audio processing for Windows loopback audio only
             setupWindowsLoopbackProcessing();
+
+            if (audioMode === 'mic_only' || audioMode === 'both') {
+                let micStream = null;
+                try {
+                    micStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            sampleRate: SAMPLE_RATE,
+                            channelCount: 1,
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true,
+                        },
+                        video: false,
+                    });
+                    console.log('Windows microphone capture started');
+                    setupLinuxMicProcessing(micStream);
+                } catch (micError) {
+                    console.warn('Failed to get microphone access on Windows:', micError);
+                }
+            }
         }
 
         console.log('MediaStream obtained:', {
@@ -255,29 +360,11 @@ async function startCapture(screenshotIntervalSeconds = 2, imageQuality = 'mediu
             videoTrack: mediaStream.getVideoTracks()[0]?.getSettings(),
         });
 
-        // Start capturing screenshots - check if manual mode
-        if (screenshotIntervalSeconds === 'manual' || screenshotIntervalSeconds === 'Manual') {
-            console.log('Manual mode enabled - screenshots will be captured on demand only');
-            // Don't start automatic capture in manual mode
-        } else {
-            const intervalMilliseconds = parseInt(screenshotIntervalSeconds) * 1000;
-
-            const scheduleNextCapture = () => {
-                screenshotInterval = setTimeout(async () => {
-                    await captureScreenshot(imageQuality);
-                    scheduleNextCapture();
-                }, intervalMilliseconds);
-            };
-
-            // Capture first screenshot immediately and start the loop
-            setTimeout(async () => {
-                await captureScreenshot(imageQuality);
-                scheduleNextCapture();
-            }, 100);
-        }
+        // Manual mode only - screenshots captured on demand via shortcut
+        console.log('Manual mode enabled - screenshots will be captured on demand only');
     } catch (err) {
         console.error('Error starting capture:', err);
-        interviewCrackerElement().setStatus('error');
+        cheatingDaddy.setStatus('error');
     }
 }
 
@@ -300,7 +387,7 @@ function setupLinuxMicProcessing(micStream) {
             const pcmData16 = convertFloat32ToInt16(chunk);
             const base64Data = arrayBufferToBase64(pcmData16.buffer);
 
-            await ipcRenderer.invoke('send-audio-content', {
+            await ipcRenderer.invoke('send-mic-audio-content', {
                 data: base64Data,
                 mimeType: 'audio/pcm;rate=24000',
             });
@@ -311,7 +398,37 @@ function setupLinuxMicProcessing(micStream) {
     micProcessor.connect(micAudioContext.destination);
 
     // Store processor reference for cleanup
-    audioProcessor = micProcessor;
+    micAudioProcessor = micProcessor;
+}
+
+function setupLinuxSystemAudioProcessing() {
+    // Setup system audio processing for Linux (from getDisplayMedia)
+    audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
+    const source = audioContext.createMediaStreamSource(mediaStream);
+    audioProcessor = audioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
+
+    let audioBuffer = [];
+    const samplesPerChunk = SAMPLE_RATE * AUDIO_CHUNK_DURATION;
+
+    audioProcessor.onaudioprocess = async e => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        audioBuffer.push(...inputData);
+
+        // Process audio in chunks
+        while (audioBuffer.length >= samplesPerChunk) {
+            const chunk = audioBuffer.splice(0, samplesPerChunk);
+            const pcmData16 = convertFloat32ToInt16(chunk);
+            const base64Data = arrayBufferToBase64(pcmData16.buffer);
+
+            await ipcRenderer.invoke('send-audio-content', {
+                data: base64Data,
+                mimeType: 'audio/pcm;rate=24000',
+            });
+        }
+    };
+
+    source.connect(audioProcessor);
+    audioProcessor.connect(audioContext.destination);
 }
 
 function setupWindowsLoopbackProcessing() {
@@ -348,9 +465,105 @@ async function captureScreenshot(imageQuality = 'medium', isManual = false) {
     console.log(`Capturing ${isManual ? 'manual' : 'automated'} screenshot...`);
     if (!mediaStream) return;
 
-    // Check rate limiting for automated screenshots only
-    if (!isManual && tokenTracker.shouldThrottle()) {
-        console.log('⚠️ Automated screenshot skipped due to rate limiting');
+    // Lazy init of video element
+    if (!hiddenVideo) {
+        hiddenVideo = document.createElement('video');
+        hiddenVideo.srcObject = mediaStream;
+        hiddenVideo.muted = true;
+        hiddenVideo.playsInline = true;
+        await hiddenVideo.play();
+
+        await new Promise(resolve => {
+            if (hiddenVideo.readyState >= 2) return resolve();
+            hiddenVideo.onloadedmetadata = () => resolve();
+        });
+
+        // Lazy init of canvas based on video dimensions
+        offscreenCanvas = document.createElement('canvas');
+        offscreenCanvas.width = hiddenVideo.videoWidth;
+        offscreenCanvas.height = hiddenVideo.videoHeight;
+        offscreenContext = offscreenCanvas.getContext('2d');
+    }
+
+    // Check if video is ready
+    if (hiddenVideo.readyState < 2) {
+        console.warn('Video not ready yet, skipping screenshot');
+        return;
+    }
+
+    offscreenContext.drawImage(hiddenVideo, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
+
+    // Check if image was drawn properly by sampling a pixel
+    const imageData = offscreenContext.getImageData(0, 0, 1, 1);
+    const isBlank = imageData.data.every((value, index) => {
+        // Check if all pixels are black (0,0,0) or transparent
+        return index === 3 ? true : value === 0;
+    });
+
+    if (isBlank) {
+        console.warn('Screenshot appears to be blank/black');
+    }
+
+    let qualityValue;
+    switch (imageQuality) {
+        case 'high':
+            qualityValue = 0.9;
+            break;
+        case 'medium':
+            qualityValue = 0.7;
+            break;
+        case 'low':
+            qualityValue = 0.5;
+            break;
+        default:
+            qualityValue = 0.7; // Default to medium
+    }
+
+    offscreenCanvas.toBlob(
+        async blob => {
+            if (!blob) {
+                console.error('Failed to create blob from canvas');
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onloadend = async () => {
+                const base64data = reader.result.split(',')[1];
+
+                // Validate base64 data
+                if (!base64data || base64data.length < 100) {
+                    console.error('Invalid base64 data generated');
+                    return;
+                }
+
+                const result = await ipcRenderer.invoke('send-image-content', {
+                    data: base64data,
+                });
+
+                if (result.success) {
+                    console.log(`Image sent successfully (${offscreenCanvas.width}x${offscreenCanvas.height})`);
+                } else {
+                    console.error('Failed to send image:', result.error);
+                }
+            };
+            reader.readAsDataURL(blob);
+        },
+        'image/jpeg',
+        qualityValue
+    );
+}
+
+const MANUAL_SCREENSHOT_PROMPT = `Help me on this page, give me the answer no bs, complete answer.
+So if its a code question, give me the approach in few bullet points, then the entire code. Also if theres anything else i need to know, tell me.
+If its a question about the website, give me the answer no bs, complete answer.
+If its a mcq question, give me the answer no bs, complete answer.`;
+
+async function captureManualScreenshot(imageQuality = null) {
+    console.log('Manual screenshot triggered');
+    const quality = imageQuality || currentImageQuality;
+
+    if (!mediaStream) {
+        console.error('No media stream available');
         return;
     }
 
@@ -367,25 +580,10 @@ async function captureScreenshot(imageQuality = 'medium', isManual = false) {
             hiddenVideo.onloadedmetadata = () => resolve();
         });
 
-        // Lazy init of canvas based on video dimensions with downscaling
+        // Lazy init of canvas based on video dimensions
         offscreenCanvas = document.createElement('canvas');
-        const maxDim = 1024;
-        let width = hiddenVideo.videoWidth;
-        let height = hiddenVideo.videoHeight;
-
-        if (width > maxDim || height > maxDim) {
-            if (width > height) {
-                height = Math.round((height * maxDim) / width);
-                width = maxDim;
-            } else {
-                width = Math.round((width * maxDim) / height);
-                height = maxDim;
-            }
-            console.log(`Downscaling screenshot from ${hiddenVideo.videoWidth}x${hiddenVideo.videoHeight} to ${width}x${height}`);
-        }
-
-        offscreenCanvas.width = width;
-        offscreenCanvas.height = height;
+        offscreenCanvas.width = hiddenVideo.videoWidth;
+        offscreenCanvas.height = hiddenVideo.videoHeight;
         offscreenContext = offscreenCanvas.getContext('2d');
     }
 
@@ -397,82 +595,56 @@ async function captureScreenshot(imageQuality = 'medium', isManual = false) {
 
     offscreenContext.drawImage(hiddenVideo, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
 
-    // Optimization: Skip blank check (getImageData is slow GPU sync)
-
     let qualityValue;
-    switch (imageQuality) {
-        case 'high': qualityValue = 0.9; break;
-        case 'medium': qualityValue = 0.7; break;
-        case 'low': qualityValue = 0.5; break;
-        default: qualityValue = 0.7;
+    switch (quality) {
+        case 'high':
+            qualityValue = 0.9;
+            break;
+        case 'medium':
+            qualityValue = 0.7;
+            break;
+        case 'low':
+            qualityValue = 0.5;
+            break;
+        default:
+            qualityValue = 0.7;
     }
 
-    // Faster synchronous encoding
-    const base64data = offscreenCanvas.toDataURL('image/jpeg', qualityValue).split(',')[1];
+    offscreenCanvas.toBlob(
+        async blob => {
+            if (!blob) {
+                console.error('Failed to create blob from canvas');
+                return;
+            }
 
-    if (!base64data || base64data.length < 100) {
-        console.error('Invalid image data generated');
-        return;
-    }
+            const reader = new FileReader();
+            reader.onloadend = async () => {
+                const base64data = reader.result.split(',')[1];
 
-    // Skip if image hasn't changed
-    if (!isManual && window.lastSentImage === base64data) return;
-    window.lastSentImage = base64data;
+                if (!base64data || base64data.length < 100) {
+                    console.error('Invalid base64 data generated');
+                    return;
+                }
 
-    const result = await ipcRenderer.invoke('send-image-content', {
-        data: base64data,
-    });
+                // Send image with prompt to HTTP API (response streams via IPC events)
+                const result = await ipcRenderer.invoke('send-image-content', {
+                    data: base64data,
+                    prompt: MANUAL_SCREENSHOT_PROMPT,
+                });
 
-    if (result.success) {
-        // Track tokens silently
-        const imageTokens = tokenTracker.calculateImageTokens(offscreenCanvas.width, offscreenCanvas.height);
-        tokenTracker.addTokens(imageTokens, 'image');
-    } else {
-        console.error('Failed to send image:', result.error);
-    }
-}
-
-async function captureManualScreenshot(imageQuality = null) {
-    console.log('Manual screenshot triggered');
-
-    // Show loading indicator
-    if (window.setScreenshotProcessing) {
-        window.setScreenshotProcessing(true);
-    }
-
-    // Update status to show processing
-    if (window.interviewCracker && window.interviewCracker.setStatus) {
-        window.interviewCracker.setStatus('Taking screenshot and analyzing question...');
-    }
-
-    const quality = imageQuality || currentImageQuality;
-    await captureScreenshot(quality, true); // Pass true for isManual
-
-    // Update status to show AI processing
-    if (window.interviewCracker && window.interviewCracker.setStatus) {
-        window.interviewCracker.setStatus('AI analyzing screenshot for questions...');
-    }
-
-    // Removed artificial delay for instant response
-    try {
-        await sendTextMessage(`Analyze this screenshot and identify any questions or problems. Provide a direct, concise answer immediately.
-        
-**For Code:** Provide ONLY the working code and a 1-sentence explanation.
-**For MCQ:** Provide ONLY the correct option and a 1-sentence reason.
-**For Text:** Provide a direct, concise answer.
-
-No preamble, no "Question Detected", no conversational filler. Just the answer.`);
-    } catch (error) {
-        console.error('Error sending screenshot analysis message:', error);
-        // Hide loading indicator on error
-        if (window.setScreenshotProcessing) {
-            window.setScreenshotProcessing(false);
-        }
-        // Update status to show error
-        if (window.interviewCracker && window.interviewCracker.setStatus) {
-            window.interviewCracker.setStatus('Error analyzing screenshot');
-        }
-    }
+                if (result.success) {
+                    console.log(`Image response completed from ${result.model}`);
+                    // Response already displayed via streaming events (new-response/update-response)
+                } else {
+                    console.error('Failed to get image response:', result.error);
+                    cheatingDaddy.addNewResponse(`Error: ${result.error}`);
+                }
+            };
+            reader.readAsDataURL(blob);
+        },
+        'image/jpeg',
+        qualityValue
+    );
 }
 
 // Expose functions to global scope for external access
@@ -487,6 +659,12 @@ function stopCapture() {
     if (audioProcessor) {
         audioProcessor.disconnect();
         audioProcessor = null;
+    }
+
+    // Clean up microphone audio processor (Linux only)
+    if (micAudioProcessor) {
+        micAudioProcessor.disconnect();
+        micAudioProcessor = null;
     }
 
     if (audioContext) {
@@ -537,221 +715,505 @@ async function sendTextMessage(text) {
     }
 }
 
-// Conversation storage functions using IndexedDB
-let conversationDB = null;
+// ========================================
+// AUDIO LISTENING & RESPONSE FUNCTIONS
+// ========================================
 
-async function initConversationStorage() {
-    return new Promise((resolve, reject) => {
-        const request = indexedDB.open('ConversationHistory', 1);
+// Audio listening state
+let micStream = null;
+let micAudioContext = null;
+// micAudioProcessor is already declared at the top of the file
+micAudioProcessor = null;
 
-        request.onerror = () => reject(request.error);
-        request.onsuccess = () => {
-            conversationDB = request.result;
-            resolve(conversationDB);
-        };
+/**
+ * START AUDIO LISTENING - Captures microphone audio
+ */
+async function startAudioListening() {
+    console.log('🎤 Starting microphone audio listening...');
 
-        request.onupgradeneeded = event => {
-            const db = event.target.result;
+    try {
+        // Request microphone access
+        micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                sampleRate: SAMPLE_RATE,
+                channelCount: 1,
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+            },
+            video: false,
+        });
 
-            // Create sessions store
-            if (!db.objectStoreNames.contains('sessions')) {
-                const sessionStore = db.createObjectStore('sessions', { keyPath: 'sessionId' });
-                sessionStore.createIndex('timestamp', 'timestamp', { unique: false });
+        console.log('✅ Microphone access granted');
+
+        // Create audio context for processing
+        micAudioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
+
+        if (micAudioContext.state === 'suspended') {
+            await micAudioContext.resume();
+        }
+
+        const micSource = micAudioContext.createMediaStreamSource(micStream);
+        micAudioProcessor = micAudioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
+
+        let audioBuffer = [];
+        const samplesPerChunk = SAMPLE_RATE * AUDIO_CHUNK_DURATION;
+
+        micAudioProcessor.onaudioprocess = async (e) => {
+            const inputData = e.inputBuffer.getChannelData(0);
+            audioBuffer.push(...inputData);
+
+            // Process audio in chunks
+            while (audioBuffer.length >= samplesPerChunk) {
+                const chunk = audioBuffer.splice(0, samplesPerChunk);
+                await sendAudioToGemini(chunk);
             }
         };
-    });
+
+        micSource.connect(micAudioProcessor);
+        // Don't connect to destination to avoid feedback
+
+        console.log('🎤 Microphone is now listening and sending to Gemini');
+        return { success: true };
+    } catch (error) {
+        console.error('❌ Failed to start audio listening:', error);
+        return { success: false, error: error.message };
+    }
 }
 
-async function saveConversationSession(sessionId, conversationHistory) {
-    if (!conversationDB) {
-        await initConversationStorage();
+/**
+ * SEND AUDIO TO GEMINI - Sends audio chunks to Gemini
+ */
+async function sendAudioToGemini(audioChunk) {
+    try {
+        // Convert Float32Array to Int16Array PCM
+        const pcmData16 = convertFloat32ToInt16(audioChunk);
+        const base64Data = arrayBufferToBase64(pcmData16.buffer);
+
+        // Send to Gemini via IPC invoke (was incorrectly using send)
+        await ipcRenderer.invoke('send-audio-content', {
+            data: base64Data,
+            mimeType: 'audio/pcm;rate=24000',
+        });
+    } catch (error) {
+        console.error('Error sending audio to Gemini:', error);
+    }
+}
+
+/**
+ * Stop audio listening
+ */
+function stopAudioListening() {
+    console.log('🛑 Stopping microphone audio listening...');
+
+    if (micAudioProcessor) {
+        micAudioProcessor.disconnect();
+        micAudioProcessor = null;
     }
 
-    const transaction = conversationDB.transaction(['sessions'], 'readwrite');
-    const store = transaction.objectStore('sessions');
-
-    const sessionData = {
-        sessionId: sessionId,
-        timestamp: parseInt(sessionId),
-        conversationHistory: conversationHistory,
-        lastUpdated: Date.now(),
-    };
-
-    return new Promise((resolve, reject) => {
-        const request = store.put(sessionData);
-        request.onerror = () => reject(request.error);
-        request.onsuccess = () => resolve(request.result);
-    });
-}
-
-async function getConversationSession(sessionId) {
-    if (!conversationDB) {
-        await initConversationStorage();
+    if (micAudioContext) {
+        micAudioContext.close();
+        micAudioContext = null;
     }
 
-    const transaction = conversationDB.transaction(['sessions'], 'readonly');
-    const store = transaction.objectStore('sessions');
-
-    return new Promise((resolve, reject) => {
-        const request = store.get(sessionId);
-        request.onerror = () => reject(request.error);
-        request.onsuccess = () => resolve(request.result);
-    });
-}
-
-async function getAllConversationSessions() {
-    if (!conversationDB) {
-        await initConversationStorage();
+    if (micStream) {
+        micStream.getTracks().forEach(track => track.stop());
+        micStream = null;
     }
 
-    const transaction = conversationDB.transaction(['sessions'], 'readonly');
-    const store = transaction.objectStore('sessions');
-    const index = store.index('timestamp');
-
-    return new Promise((resolve, reject) => {
-        const request = index.getAll();
-        request.onerror = () => reject(request.error);
-        request.onsuccess = () => {
-            // Sort by timestamp descending (newest first)
-            const sessions = request.result.sort((a, b) => b.timestamp - a.timestamp);
-            resolve(sessions);
-        };
-    });
+    console.log('✅ Microphone stopped');
 }
 
-// Listen for conversation data from main process
+// ========================================
+// LINE-BY-LINE RESPONSE DISPLAY
+// ========================================
+
+let currentResponseBuffer = '';
+
+/**
+ * DISPLAY NEW RESPONSE - Shows new response card
+ */
+function displayNewResponse() {
+    console.log('📝 Creating new response card');
+
+    // Reset buffer for new response
+    currentResponseBuffer = '';
+
+    // Get AssistantView
+    const assistantView = document.querySelector('assistant-view');
+    if (!assistantView) {
+        console.warn('AssistantView not found');
+        return null;
+    }
+
+    // Add empty response to start
+    const responses = assistantView.responses || [];
+    assistantView.responses = [...responses, ''];
+    assistantView.requestUpdate();
+
+    return assistantView;
+}
+
+/**
+ * UPDATE RESPONSE LINE BY LINE - Adds lines as they come
+ */
+function updateResponseLineByLine(textChunk) {
+    if (!textChunk) return;
+
+    // Add to buffer
+    currentResponseBuffer += textChunk;
+
+    // Get AssistantView and update its responses
+    const assistantView = document.querySelector('assistant-view');
+    if (!assistantView) return;
+
+    // Update the current (last) response in the array
+    const responses = assistantView.responses || [];
+    if (responses.length === 0) {
+        // Create first response
+        assistantView.responses = [currentResponseBuffer];
+    } else {
+        // Update last response
+        responses[responses.length - 1] = currentResponseBuffer;
+        assistantView.responses = [...responses]; // Trigger update
+    }
+
+    assistantView.requestUpdate();
+}
+
+/**
+ * COPY RESPONSE TO CLIPBOARD - Copies full response
+ */
+async function copyResponseToClipboard(responseIndex = -1) {
+    const assistantView = document.querySelector('assistant-view');
+    if (!assistantView) {
+        console.error('AssistantView not found');
+        return { success: false, error: 'AssistantView not found' };
+    }
+
+    const responses = assistantView.responses || [];
+
+    // If index is -1, copy the last response
+    const index = responseIndex === -1 ? responses.length - 1 : responseIndex;
+
+    if (index < 0 || index >= responses.length) {
+        console.error('Invalid response index');
+        return { success: false, error: 'Invalid response index' };
+    }
+
+    const responseToCopy = responses[index];
+
+    try {
+        await navigator.clipboard.writeText(responseToCopy);
+        console.log('✅ Response copied to clipboard');
+        return { success: true };
+    } catch (error) {
+        console.error('❌ Failed to copy response:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// Listen for conversation data from main process and save to storage
 ipcRenderer.on('save-conversation-turn', async (event, data) => {
     try {
-        await saveConversationSession(data.sessionId, data.fullHistory);
+        await storage.saveSession(data.sessionId, { conversationHistory: data.fullHistory });
         console.log('Conversation session saved:', data.sessionId);
     } catch (error) {
         console.error('Error saving conversation session:', error);
     }
 });
 
-// Initialize conversation storage when renderer loads
-initConversationStorage().catch(console.error);
+// Listen for session context (profile info) when session starts
+ipcRenderer.on('save-session-context', async (event, data) => {
+    try {
+        await storage.saveSession(data.sessionId, {
+            profile: data.profile,
+            customPrompt: data.customPrompt
+        });
+        console.log('Session context saved:', data.sessionId, 'profile:', data.profile);
+    } catch (error) {
+        console.error('Error saving session context:', error);
+    }
+});
+
+// Listen for screen analysis responses (from ctrl+enter)
+ipcRenderer.on('save-screen-analysis', async (event, data) => {
+    try {
+        await storage.saveSession(data.sessionId, {
+            screenAnalysisHistory: data.fullHistory,
+            profile: data.profile,
+            customPrompt: data.customPrompt
+        });
+        console.log('Screen analysis saved:', data.sessionId);
+    } catch (error) {
+        console.error('Error saving screen analysis:', error);
+    }
+});
+
+// Listen for emergency erase command from main process
+ipcRenderer.on('clear-sensitive-data', async () => {
+    console.log('Clearing all data...');
+    await storage.clearAll();
+});
 
 // Handle shortcuts based on current view
 function handleShortcut(shortcutKey) {
-    console.log('Handling shortcut:', shortcutKey);
-
-    // Get current view from the app
-    const currentView = window.interviewCracker.getCurrentView ? window.interviewCracker.getCurrentView() : null;
-    console.log('Current view:', currentView);
+    const currentView = cheatingDaddy.getCurrentView();
 
     if (shortcutKey === 'ctrl+enter' || shortcutKey === 'cmd+enter') {
         if (currentView === 'main') {
-            // Trigger the start session from main view
-            console.log('Triggering start session from main view');
-
-            // First try to get the app component and call handleStart directly
-            const appElement = document.querySelector('interview-ai-app');
-            if (appElement && typeof appElement.handleStart === 'function') {
-                appElement.handleStart();
-            } else {
-                // Fallback: simulate click on the start button
-                const mainView = document.querySelector('main-view');
-                if (mainView) {
-                    const startButton = mainView.shadowRoot?.querySelector('.start-button');
-                    if (startButton && !startButton.classList.contains('initializing')) {
-                        startButton.click();
-                    } else {
-                        console.warn('Start button not available or initializing');
-                    }
-                } else {
-                    console.warn('Could not find main-view element');
-                }
-            }
+            cheatingDaddy.element().handleStart();
         } else {
-            // In other views, take manual screenshot
-            console.log('Taking manual screenshot from current view');
             captureManualScreenshot();
         }
     }
 }
 
-window.interviewAI = window.interviewCracker = {
+// Create reference to the main app element
+const cheatingDaddyApp = document.querySelector('interview-ai-app');
+
+// ============ THEME SYSTEM ============
+const theme = {
+    themes: {
+        dark: {
+            background: '#1e1e1e',
+            text: '#e0e0e0', textSecondary: '#a0a0a0', textMuted: '#6b6b6b',
+            border: '#333333', accent: '#ffffff',
+            btnPrimaryBg: '#ffffff', btnPrimaryText: '#000000', btnPrimaryHover: '#e0e0e0',
+            tooltipBg: '#1a1a1a', tooltipText: '#ffffff',
+            keyBg: 'rgba(255,255,255,0.1)'
+        },
+        light: {
+            background: '#ffffff',
+            text: '#1a1a1a', textSecondary: '#555555', textMuted: '#888888',
+            border: '#e0e0e0', accent: '#000000',
+            btnPrimaryBg: '#1a1a1a', btnPrimaryText: '#ffffff', btnPrimaryHover: '#333333',
+            tooltipBg: '#1a1a1a', tooltipText: '#ffffff',
+            keyBg: 'rgba(0,0,0,0.1)'
+        },
+        midnight: {
+            background: '#0d1117',
+            text: '#c9d1d9', textSecondary: '#8b949e', textMuted: '#6e7681',
+            border: '#30363d', accent: '#58a6ff',
+            btnPrimaryBg: '#58a6ff', btnPrimaryText: '#0d1117', btnPrimaryHover: '#79b8ff',
+            tooltipBg: '#161b22', tooltipText: '#c9d1d9',
+            keyBg: 'rgba(88,166,255,0.15)'
+        },
+        sepia: {
+            background: '#f4ecd8',
+            text: '#5c4b37', textSecondary: '#7a6a56', textMuted: '#998875',
+            border: '#d4c8b0', accent: '#8b4513',
+            btnPrimaryBg: '#5c4b37', btnPrimaryText: '#f4ecd8', btnPrimaryHover: '#7a6a56',
+            tooltipBg: '#5c4b37', tooltipText: '#f4ecd8',
+            keyBg: 'rgba(92,75,55,0.15)'
+        },
+        nord: {
+            background: '#2e3440',
+            text: '#eceff4', textSecondary: '#d8dee9', textMuted: '#4c566a',
+            border: '#3b4252', accent: '#88c0d0',
+            btnPrimaryBg: '#88c0d0', btnPrimaryText: '#2e3440', btnPrimaryHover: '#8fbcbb',
+            tooltipBg: '#3b4252', tooltipText: '#eceff4',
+            keyBg: 'rgba(136,192,208,0.15)'
+        },
+        dracula: {
+            background: '#282a36',
+            text: '#f8f8f2', textSecondary: '#bd93f9', textMuted: '#6272a4',
+            border: '#44475a', accent: '#ff79c6',
+            btnPrimaryBg: '#ff79c6', btnPrimaryText: '#282a36', btnPrimaryHover: '#ff92d0',
+            tooltipBg: '#44475a', tooltipText: '#f8f8f2',
+            keyBg: 'rgba(255,121,198,0.15)'
+        },
+        abyss: {
+            background: '#0a0a0a',
+            text: '#d4d4d4', textSecondary: '#808080', textMuted: '#505050',
+            border: '#1a1a1a', accent: '#ffffff',
+            btnPrimaryBg: '#ffffff', btnPrimaryText: '#0a0a0a', btnPrimaryHover: '#d4d4d4',
+            tooltipBg: '#141414', tooltipText: '#d4d4d4',
+            keyBg: 'rgba(255,255,255,0.08)'
+        }
+    },
+
+    current: 'dark',
+
+    get(name) {
+        return this.themes[name] || this.themes.dark;
+    },
+
+    getAll() {
+        const names = {
+            dark: 'Dark',
+            light: 'Light',
+            midnight: 'Midnight Blue',
+            sepia: 'Sepia',
+            nord: 'Nord',
+            dracula: 'Dracula',
+            abyss: 'Abyss'
+        };
+        return Object.keys(this.themes).map(key => ({
+            value: key,
+            name: names[key] || key,
+            colors: this.themes[key]
+        }));
+    },
+
+    hexToRgb(hex) {
+        const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+        return result ? {
+            r: parseInt(result[1], 16),
+            g: parseInt(result[2], 16),
+            b: parseInt(result[3], 16)
+        } : { r: 30, g: 30, b: 30 };
+    },
+
+    lightenColor(rgb, amount) {
+        return {
+            r: Math.min(255, rgb.r + amount),
+            g: Math.min(255, rgb.g + amount),
+            b: Math.min(255, rgb.b + amount)
+        };
+    },
+
+    darkenColor(rgb, amount) {
+        return {
+            r: Math.max(0, rgb.r - amount),
+            g: Math.max(0, rgb.g - amount),
+            b: Math.max(0, rgb.b - amount)
+        };
+    },
+
+    applyBackgrounds(backgroundColor, alpha = 0.8) {
+        const root = document.documentElement;
+        const baseRgb = this.hexToRgb(backgroundColor);
+
+        // For light themes, darken; for dark themes, lighten
+        const isLight = (baseRgb.r + baseRgb.g + baseRgb.b) / 3 > 128;
+        const adjust = isLight ? this.darkenColor.bind(this) : this.lightenColor.bind(this);
+
+        const secondary = adjust(baseRgb, 7);
+        const tertiary = adjust(baseRgb, 15);
+        const hover = adjust(baseRgb, 20);
+
+        root.style.setProperty('--header-background', `rgba(${baseRgb.r}, ${baseRgb.g}, ${baseRgb.b}, ${alpha})`);
+        root.style.setProperty('--main-content-background', `rgba(${baseRgb.r}, ${baseRgb.g}, ${baseRgb.b}, ${alpha})`);
+        root.style.setProperty('--bg-primary', `rgba(${baseRgb.r}, ${baseRgb.g}, ${baseRgb.b}, ${alpha})`);
+        root.style.setProperty('--bg-secondary', `rgba(${secondary.r}, ${secondary.g}, ${secondary.b}, ${alpha})`);
+        root.style.setProperty('--bg-tertiary', `rgba(${tertiary.r}, ${tertiary.g}, ${tertiary.b}, ${alpha})`);
+        root.style.setProperty('--bg-hover', `rgba(${hover.r}, ${hover.g}, ${hover.b}, ${alpha})`);
+        root.style.setProperty('--input-background', `rgba(${tertiary.r}, ${tertiary.g}, ${tertiary.b}, ${alpha})`);
+        root.style.setProperty('--input-focus-background', `rgba(${tertiary.r}, ${tertiary.g}, ${tertiary.b}, ${alpha})`);
+        root.style.setProperty('--hover-background', `rgba(${hover.r}, ${hover.g}, ${hover.b}, ${alpha})`);
+        root.style.setProperty('--scrollbar-background', `rgba(${baseRgb.r}, ${baseRgb.g}, ${baseRgb.b}, ${alpha})`);
+    },
+
+    apply(themeName, alpha = 0.8) {
+        const colors = this.get(themeName);
+        this.current = themeName;
+        const root = document.documentElement;
+
+        // Text colors
+        root.style.setProperty('--text-color', colors.text);
+        root.style.setProperty('--text-secondary', colors.textSecondary);
+        root.style.setProperty('--text-muted', colors.textMuted);
+        // Border colors
+        root.style.setProperty('--border-color', colors.border);
+        root.style.setProperty('--border-default', colors.accent);
+        // Misc
+        root.style.setProperty('--placeholder-color', colors.textMuted);
+        root.style.setProperty('--scrollbar-thumb', colors.border);
+        root.style.setProperty('--scrollbar-thumb-hover', colors.textMuted);
+        root.style.setProperty('--key-background', colors.keyBg);
+        // Primary button
+        root.style.setProperty('--btn-primary-bg', colors.btnPrimaryBg);
+        root.style.setProperty('--btn-primary-text', colors.btnPrimaryText);
+        root.style.setProperty('--btn-primary-hover', colors.btnPrimaryHover);
+        // Start button (same as primary)
+        root.style.setProperty('--start-button-background', colors.btnPrimaryBg);
+        root.style.setProperty('--start-button-color', colors.btnPrimaryText);
+        root.style.setProperty('--start-button-hover-background', colors.btnPrimaryHover);
+        // Tooltip
+        root.style.setProperty('--tooltip-bg', colors.tooltipBg);
+        root.style.setProperty('--tooltip-text', colors.tooltipText);
+        // Error color (stays constant)
+        root.style.setProperty('--error-color', '#f14c4c');
+        root.style.setProperty('--success-color', '#4caf50');
+
+        // Also apply background colors from theme
+        this.applyBackgrounds(colors.background, alpha);
+    },
+
+    async load() {
+        try {
+            const prefs = await storage.getPreferences();
+            const themeName = prefs.theme || 'dark';
+            const alpha = prefs.backgroundTransparency ?? 0.8;
+            this.apply(themeName, alpha);
+            return themeName;
+        } catch (err) {
+            this.apply('dark');
+            return 'dark';
+        }
+    },
+
+    async save(themeName) {
+        await storage.updatePreference('theme', themeName);
+        this.apply(themeName);
+    }
+};
+
+// Consolidated cheatingDaddy object - all functions in one place
+const cheatingDaddy = {
+    // App version
+    getVersion: async () => ipcRenderer.invoke('get-app-version'),
+
+    // Element access
+    element: () => cheatingDaddyApp,
+    e: () => cheatingDaddyApp,
+
+    // App state functions - access properties directly from the app element
+    getCurrentView: () => cheatingDaddyApp.currentView,
+    getLayoutMode: () => cheatingDaddyApp.layoutMode,
+
+    // Status and response functions
+    setStatus: text => cheatingDaddyApp.setStatus(text),
+    addNewResponse: response => cheatingDaddyApp.setResponse(response),
+    updateCurrentResponse: response => cheatingDaddyApp.setResponse(response),
+
+    // Core functionality
     initializeGemini,
     startCapture,
     stopCapture,
     sendTextMessage,
     handleShortcut,
-    // Conversation history functions
-    getAllConversationSessions,
-    getConversationSession,
-    initConversationStorage,
-    // Content protection function
-    getContentProtection: () => {
-        const contentProtection = localStorage.getItem('contentProtection');
-        return contentProtection !== null ? contentProtection === 'true' : true;
-    },
+
+    // NEW AUDIO & RESPONSE FUNCTIONS
+    startAudioListening,
+    stopAudioListening,
+    sendAudioToGemini,
+    displayNewResponse,
+    updateResponseLineByLine,
+    copyResponseToClipboard,
+
+    // Storage API
+    storage,
+
+    // Theme API
+    theme,
+
+    // Refresh preferences cache (call after updating preferences)
+    refreshPreferencesCache: loadPreferencesCache,
+
+    // Platform detection
     isLinux: isLinux,
     isMacOS: isMacOS,
-    e: interviewCrackerElement,
-
-    // Storage functions for CustomizeView
-    storage: {
-        async getPreferences() {
-            return {
-                googleSearchEnabled: localStorage.getItem('googleSearchEnabled') === 'true',
-                backgroundTransparency: parseFloat(localStorage.getItem('backgroundTransparency') || '0.8'),
-                fontSize: parseInt(localStorage.getItem('fontSize') || '20', 10),
-                audioMode: localStorage.getItem('audioMode') || 'speaker_only',
-                customPrompt: localStorage.getItem('customPrompt') || '',
-                theme: localStorage.getItem('theme') || 'dark'
-            };
-        },
-        async getKeybinds() {
-            const saved = localStorage.getItem('customKeybinds');
-            return saved ? JSON.parse(saved) : null;
-        },
-        async setKeybinds(keybinds) {
-            if (keybinds === null) {
-                localStorage.removeItem('customKeybinds');
-            } else {
-                localStorage.setItem('customKeybinds', JSON.stringify(keybinds));
-            }
-        },
-        async updatePreference(key, value) {
-            localStorage.setItem(key, value.toString());
-        },
-        async clearAll() {
-            localStorage.clear();
-        }
-    },
-
-    // Theme functions for CustomizeView
-    theme: {
-        getAll() {
-            return [
-                { value: 'dark', name: 'Dark' },
-                { value: 'light', name: 'Light' }
-            ];
-        },
-        get(themeName) {
-            const themes = {
-                dark: {
-                    background: 'rgba(0, 0, 0, 0.3)',
-                    text: '#f7f7fa'
-                },
-                light: {
-                    background: 'rgba(255, 255, 255, 0.3)',
-                    text: '#1f2937'
-                }
-            };
-            return themes[themeName] || themes.dark;
-        },
-        async save(themeName) {
-            localStorage.setItem('theme', themeName);
-            // Apply theme to document
-            document.documentElement.setAttribute('data-theme', themeName);
-        },
-        applyBackgrounds(backgroundColor, transparency) {
-            // Apply background with transparency
-            const root = document.documentElement;
-            root.style.setProperty('--background-transparent', backgroundColor.replace(/[\d.]+\)$/, `${transparency})`));
-        }
-    }
 };
 
+// Make it globally available
+window.cheatingDaddy = cheatingDaddy;
+window.interviewAI = window.interviewCracker = cheatingDaddy;
+
+// Load theme after DOM is ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => theme.load());
+} else {
+    theme.load();
+}

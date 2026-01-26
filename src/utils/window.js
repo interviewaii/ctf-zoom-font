@@ -25,7 +25,6 @@ function ensureDataDirectories() {
 }
 
 function createWindow(sendToRenderer, geminiSessionRef) {
-    // Get layout preference (default to 'normal')
     let windowWidth = 1100;
     let windowHeight = 600;
 
@@ -42,7 +41,7 @@ function createWindow(sendToRenderer, geminiSessionRef) {
         hiddenInMissionControl: true,
         webPreferences: {
             nodeIntegration: true,
-            contextIsolation: false, // TODO: change to true
+            contextIsolation: false,
             backgroundThrottling: false,
             enableBlinkFeatures: 'GetDisplayMedia',
             webSecurity: true,
@@ -65,7 +64,6 @@ function createWindow(sendToRenderer, geminiSessionRef) {
     mainWindow.setContentProtection(true);
     mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
-    // Center window at the top of the screen
     const primaryDisplay = screen.getPrimaryDisplay();
     const { width: screenWidth } = primaryDisplay.workAreaSize;
     const x = Math.floor((screenWidth - windowWidth) / 2);
@@ -77,23 +75,16 @@ function createWindow(sendToRenderer, geminiSessionRef) {
     }
 
     mainWindow.loadFile(path.join(__dirname, '../index.html'));
-
-    // Show the window after loading
     mainWindow.showInactive();
-
-    // Allow renderer to handle zoom
     mainWindow.webContents.setZoomFactor(1);
 
-
-    // After window is created, check for layout preference and resize if needed
     mainWindow.webContents.once('dom-ready', () => {
         setTimeout(() => {
             const defaultKeybinds = getDefaultKeybinds();
             let keybinds = defaultKeybinds;
 
             mainWindow.webContents
-                .executeJavaScript(
-                    `
+                .executeJavaScript(`
                 try {
                     const savedKeybinds = localStorage.getItem('customKeybinds');
                     const savedSize = localStorage.getItem('windowSize');
@@ -107,8 +98,7 @@ function createWindow(sendToRenderer, geminiSessionRef) {
                 } catch (e) {
                     return { keybinds: null, size: null, position: null };
                 }
-            `
-                )
+            `)
                 .then(async savedSettings => {
                     if (savedSettings.keybinds) {
                         keybinds = { ...defaultKeybinds, ...savedSettings.keybinds };
@@ -121,29 +111,24 @@ function createWindow(sendToRenderer, geminiSessionRef) {
                         mainWindow.setPosition(savedSettings.position.x, savedSettings.position.y);
                     }
 
-                    // Apply content protection setting via IPC handler
                     try {
                         const contentProtection = await mainWindow.webContents.executeJavaScript(
                             'window.interviewCracker ? window.interviewCracker.getContentProtection() : true'
                         );
                         mainWindow.setContentProtection(contentProtection);
-                        console.log('Content protection loaded from settings:', contentProtection);
                     } catch (error) {
-                        console.error('Error loading content protection:', error);
                         mainWindow.setContentProtection(true);
                     }
 
                     updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessionRef);
                 })
                 .catch(() => {
-                    // Default to content protection enabled
                     mainWindow.setContentProtection(true);
                     updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessionRef);
                 });
         }, 150);
     });
 
-    // Save window size and position on change
     const saveBounds = () => {
         if (mainWindow.isDestroyed()) return;
         const bounds = mainWindow.getBounds();
@@ -167,41 +152,24 @@ function setupMenu() {
         {
             label: 'Edit',
             submenu: [
-                { role: 'undo' },
-                { role: 'redo' },
-                { type: 'separator' },
-                { role: 'cut' },
-                { role: 'copy' },
-                { role: 'paste' },
-                { role: 'delete' },
-                { type: 'separator' },
-                { role: 'selectAll' }
+                { role: 'undo' }, { role: 'redo' }, { type: 'separator' },
+                { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'delete' },
+                { type: 'separator' }, { role: 'selectAll' }
             ]
         },
         {
             label: 'View',
             submenu: [
-                { role: 'reload' },
-                { role: 'forceReload' },
-                { role: 'toggleDevTools' },
-                { type: 'separator' },
-                { role: 'resetZoom' },
-                { role: 'zoomIn' },
-                { role: 'zoomOut' },
-                { type: 'separator' },
-                { role: 'togglefullscreen' }
+                { role: 'reload' }, { role: 'forceReload' }, { role: 'toggleDevTools' },
+                { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' },
+                { type: 'separator' }, { role: 'togglefullscreen' }
             ]
         },
         {
             label: 'Window',
-            submenu: [
-                { role: 'minimize' },
-                { role: 'zoom' },
-                { role: 'close' }
-            ]
+            submenu: [{ role: 'minimize' }, { role: 'zoom' }, { role: 'close' }]
         }
     ];
-
     const menu = Menu.buildFromTemplate(template);
     Menu.setApplicationMenu(menu);
 }
@@ -209,10 +177,10 @@ function setupMenu() {
 function getDefaultKeybinds() {
     const isMac = process.platform === 'darwin';
     return {
-        moveUp: isMac ? 'Shift+Up' : 'Shift+Up',
-        moveDown: isMac ? 'Shift+Down' : 'Shift+Down',
-        moveLeft: isMac ? 'Shift+Left' : 'Shift+Left',
-        moveRight: isMac ? 'Shift+Right' : 'Shift+Right',
+        moveUp: 'Shift+Up',
+        moveDown: 'Shift+Down',
+        moveLeft: 'Shift+Left',
+        moveRight: 'Shift+Right',
         toggleVisibility: isMac ? 'Cmd+\\' : 'Ctrl+\\',
         toggleClickThrough: isMac ? 'Cmd+M' : 'Ctrl+M',
         nextStep: isMac ? 'Cmd+Enter' : 'Ctrl+Enter',
@@ -224,260 +192,106 @@ function getDefaultKeybinds() {
 }
 
 function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessionRef) {
-    console.log('Updating global shortcuts with:', keybinds);
-
-    // Unregister all existing shortcuts
     globalShortcut.unregisterAll();
 
     const primaryDisplay = screen.getPrimaryDisplay();
     const { width, height } = primaryDisplay.workAreaSize;
-    const moveIncrement = Math.floor(Math.min(width, height) * 0.1);
+    const moveIncrement = 50;
 
-    // Register window movement shortcuts with boundary checking
     const movementActions = {
         moveUp: () => {
             if (!mainWindow.isVisible()) return;
-            const [currentX, currentY] = mainWindow.getPosition();
-            const [windowWidth, windowHeight] = mainWindow.getSize();
-            const newY = Math.max(0, currentY - moveIncrement);
-            mainWindow.setPosition(currentX, newY);
-            console.log(`Window moved UP to position: (${currentX}, ${newY})`);
+            const [x, y] = mainWindow.getPosition();
+            mainWindow.setPosition(x, Math.max(0, y - moveIncrement));
         },
         moveDown: () => {
             if (!mainWindow.isVisible()) return;
-            const [currentX, currentY] = mainWindow.getPosition();
-            const [windowWidth, windowHeight] = mainWindow.getSize();
-            const maxY = height - windowHeight;
-            const newY = Math.min(maxY, currentY + moveIncrement);
-            mainWindow.setPosition(currentX, newY);
-            console.log(`Window moved DOWN to position: (${currentX}, ${newY})`);
+            const [x, y] = mainWindow.getPosition();
+            const [w, h] = mainWindow.getSize();
+            mainWindow.setPosition(x, Math.min(height - h, y + moveIncrement));
         },
         moveLeft: () => {
             if (!mainWindow.isVisible()) return;
-            const [currentX, currentY] = mainWindow.getPosition();
-            const [windowWidth, windowHeight] = mainWindow.getSize();
-            const newX = Math.max(0, currentX - moveIncrement);
-            mainWindow.setPosition(newX, currentY);
-            console.log(`Window moved LEFT to position: (${newX}, ${currentY})`);
+            const [x, y] = mainWindow.getPosition();
+            mainWindow.setPosition(Math.max(0, x - moveIncrement), y);
         },
         moveRight: () => {
             if (!mainWindow.isVisible()) return;
-            const [currentX, currentY] = mainWindow.getPosition();
-            const [windowWidth, windowHeight] = mainWindow.getSize();
-            const maxX = width - windowWidth;
-            const newX = Math.min(maxX, currentX + moveIncrement);
-            mainWindow.setPosition(newX, currentY);
-            console.log(`Window moved RIGHT to position: (${newX}, ${currentY})`);
+            const [x, y] = mainWindow.getPosition();
+            const [w, h] = mainWindow.getSize();
+            mainWindow.setPosition(Math.min(width - w, x + moveIncrement), y);
         },
     };
 
-    // Register each movement shortcut
     Object.keys(movementActions).forEach(action => {
         const keybind = keybinds[action];
         if (keybind) {
             try {
-                const success = globalShortcut.register(keybind, movementActions[action]);
-                if (success) {
-                    console.log(`✅ Registered global shortcut ${action}: ${keybind}`);
-                } else {
-                    console.error(`❌ Failed to register global shortcut ${action}: ${keybind} (already in use or invalid)`);
-
-                    // Try fallback with Arrow suffix if it's a simple direction
-                    if (['Up', 'Down', 'Left', 'Right'].includes(keybind.split('+').pop())) {
-                        const fallback = keybind.replace(/Up|Down|Left|Right/, (m) => m + 'Arrow');
-                        const fallbackSuccess = globalShortcut.register(fallback, movementActions[action]);
-                        if (fallbackSuccess) {
-                            console.log(`✅ Registered fallback global shortcut ${action}: ${fallback}`);
-                        }
-                    }
-                }
+                globalShortcut.register(keybind, movementActions[action]);
             } catch (error) {
-                console.error(`💥 Error registering ${action} (${keybind}):`, error);
+                console.error(`Failed to register ${action}:`, error);
             }
         }
     });
 
-    // Register toggle visibility shortcut
     if (keybinds.toggleVisibility) {
-        try {
-            globalShortcut.register(keybinds.toggleVisibility, () => {
-                if (mainWindow.isVisible()) {
-                    mainWindow.hide();
-                } else {
-                    mainWindow.showInactive();
-                }
-            });
-            console.log(`Registered toggleVisibility: ${keybinds.toggleVisibility}`);
-        } catch (error) {
-            console.error(`Failed to register toggleVisibility (${keybinds.toggleVisibility}):`, error);
-        }
+        globalShortcut.register(keybinds.toggleVisibility, () => {
+            if (mainWindow.isVisible()) mainWindow.hide();
+            else mainWindow.showInactive();
+        });
     }
 
-    // Register toggle click-through shortcut
     if (keybinds.toggleClickThrough) {
-        try {
-            globalShortcut.register(keybinds.toggleClickThrough, () => {
-                mouseEventsIgnored = !mouseEventsIgnored;
-                if (mouseEventsIgnored) {
-                    mainWindow.setIgnoreMouseEvents(true, { forward: true });
-                    console.log('Mouse events ignored');
-                } else {
-                    mainWindow.setIgnoreMouseEvents(false);
-                    console.log('Mouse events enabled');
-                }
-                mainWindow.webContents.send('click-through-toggled', mouseEventsIgnored);
-            });
-            console.log(`Registered toggleClickThrough: ${keybinds.toggleClickThrough}`);
-        } catch (error) {
-            console.error(`Failed to register toggleClickThrough (${keybinds.toggleClickThrough}):`, error);
-        }
+        globalShortcut.register(keybinds.toggleClickThrough, () => {
+            mouseEventsIgnored = !mouseEventsIgnored;
+            mainWindow.setIgnoreMouseEvents(mouseEventsIgnored, { forward: true });
+            mainWindow.webContents.send('click-through-toggled', mouseEventsIgnored);
+        });
     }
 
-    // Register next step shortcut (either starts session or takes screenshot based on view)
     if (keybinds.nextStep) {
-        try {
-            globalShortcut.register(keybinds.nextStep, async () => {
-                console.log('Next step shortcut triggered');
-                try {
-                    // Determine the shortcut key format
-                    const isMac = process.platform === 'darwin';
-                    const shortcutKey = isMac ? 'cmd+enter' : 'ctrl+enter';
-
-                    // Use the new handleShortcut function
-                    mainWindow.webContents.executeJavaScript(`
-                        if (window.interviewCracker && window.interviewCracker.handleShortcut) {
-  window.interviewCracker.handleShortcut('${shortcutKey}');
-                        } else {
-                            console.log('handleShortcut function not available');
-                        }
-                    `);
-                } catch (error) {
-                    console.error('Error handling next step shortcut:', error);
+        globalShortcut.register(keybinds.nextStep, () => {
+            const isMac = process.platform === 'darwin';
+            const shortcutKey = isMac ? 'cmd+enter' : 'ctrl+enter';
+            mainWindow.webContents.executeJavaScript(`
+                if (window.interviewCracker && window.interviewCracker.handleShortcut) {
+                    window.interviewCracker.handleShortcut('${shortcutKey}');
                 }
-            });
-            console.log(`Registered nextStep: ${keybinds.nextStep}`);
-        } catch (error) {
-            console.error(`Failed to register nextStep (${keybinds.nextStep}):`, error);
-        }
+            `);
+        });
     }
 
-    // Register previous response shortcut
     if (keybinds.previousResponse) {
-        try {
-            globalShortcut.register(keybinds.previousResponse, () => {
-                console.log('Previous response shortcut triggered');
-                sendToRenderer('navigate-previous-response');
-            });
-            console.log(`Registered previousResponse: ${keybinds.previousResponse}`);
-        } catch (error) {
-            console.error(`Failed to register previousResponse (${keybinds.previousResponse}):`, error);
-        }
+        globalShortcut.register(keybinds.previousResponse, () => sendToRenderer('navigate-previous-response'));
     }
-
-    // Register next response shortcut
     if (keybinds.nextResponse) {
-        try {
-            globalShortcut.register(keybinds.nextResponse, () => {
-                console.log('Next response shortcut triggered');
-                sendToRenderer('navigate-next-response');
-            });
-            console.log(`Registered nextResponse: ${keybinds.nextResponse}`);
-        } catch (error) {
-            console.error(`Failed to register nextResponse (${keybinds.nextResponse}):`, error);
-        }
+        globalShortcut.register(keybinds.nextResponse, () => sendToRenderer('navigate-next-response'));
     }
-
-    // Register scroll up shortcut
     if (keybinds.scrollUp) {
-        try {
-            globalShortcut.register(keybinds.scrollUp, () => {
-                console.log('Scroll up shortcut triggered');
-                sendToRenderer('scroll-response-up');
-            });
-            console.log(`Registered scrollUp: ${keybinds.scrollUp}`);
-        } catch (error) {
-            console.error(`Failed to register scrollUp (${keybinds.scrollUp}):`, error);
-        }
+        globalShortcut.register(keybinds.scrollUp, () => sendToRenderer('scroll-response-up'));
     }
-
-    // Register scroll down shortcut
     if (keybinds.scrollDown) {
-        try {
-            globalShortcut.register(keybinds.scrollDown, () => {
-                console.log('Scroll down shortcut triggered');
-                sendToRenderer('scroll-response-down');
-            });
-            console.log(`Registered scrollDown: ${keybinds.scrollDown}`);
-        } catch (error) {
-            console.error(`Failed to register scrollDown (${keybinds.scrollDown}):`, error);
-        }
+        globalShortcut.register(keybinds.scrollDown, () => sendToRenderer('scroll-response-down'));
     }
 }
 
 function setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef) {
-    // Remove existing listeners to avoid duplicates
-    ipcMain.removeAllListeners('move-window');
-    ipcMain.removeAllListeners('view-changed');
-    ipcMain.removeHandler('window-minimize');
-    ipcMain.removeAllListeners('update-keybinds');
-    ipcMain.removeHandler('toggle-window-visibility');
-    ipcMain.removeHandler('toggle-screen-share-visibility');
-    ipcMain.removeHandler('update-sizes');
-    ipcMain.removeHandler('manual-resize');
-
-    // Handle window movement via IPC (for Shift+Arrow keys from renderer)
     ipcMain.on('move-window', (event, direction) => {
-        console.log('📨 Received move-window IPC message:', direction);
+        if (mainWindow.isDestroyed()) return;
+        const primaryDisplay = screen.getPrimaryDisplay();
+        const { width, height } = primaryDisplay.workAreaSize;
+        const bounds = mainWindow.getBounds();
+        const moveIncrement = 50;
+        let newX = bounds.x, newY = bounds.y;
 
-        if (mainWindow.isDestroyed()) {
-            console.log('⚠️ Window is destroyed, cannot move');
-            return;
+        switch (direction) {
+            case 'up': newY = Math.max(0, bounds.y - moveIncrement); break;
+            case 'down': newY = Math.min(height - bounds.height, bounds.y + moveIncrement); break;
+            case 'left': newX = Math.max(0, bounds.x - moveIncrement); break;
+            case 'right': newX = Math.min(width - bounds.width, bounds.x + moveIncrement); break;
         }
-
-        try {
-            // Get screen dimensions
-            const primaryDisplay = screen.getPrimaryDisplay();
-            const { width, height } = primaryDisplay.workAreaSize;
-
-            const bounds = mainWindow.getBounds();
-            const moveIncrement = 50; // Fixed 50px increment for better control
-
-            let newX = bounds.x;
-            let newY = bounds.y;
-
-            switch (direction) {
-                case 'up':
-                    newY = Math.max(0, bounds.y - moveIncrement);
-                    break;
-                case 'down':
-                    const maxY = height - bounds.height;
-                    newY = Math.min(maxY, bounds.y + moveIncrement);
-                    break;
-                case 'left':
-                    newX = Math.max(0, bounds.x - moveIncrement);
-                    break;
-                case 'right':
-                    const maxX = width - bounds.width;
-                    newX = Math.min(maxX, bounds.x + moveIncrement);
-                    break;
-                default:
-                    console.log('⚠️ Unknown direction:', direction);
-                    return;
-            }
-
-            mainWindow.setBounds({
-                x: newX,
-                y: newY,
-                width: bounds.width,
-                height: bounds.height
-            });
-            console.log(`✅ Window moved ${direction.toUpperCase()} to position: (${newX}, ${newY})`);
-
-            // Notify renderer about the move to ensure state is synced if needed
-            mainWindow.webContents.send('window-moved', { x: newX, y: newY });
-        } catch (error) {
-            console.error('💥 Error moving window:', error);
-        }
+        mainWindow.setBounds({ x: newX, y: newY, width: bounds.width, height: bounds.height });
+        mainWindow.webContents.send('window-moved', { x: newX, y: newY });
     });
 
     ipcMain.on('view-changed', (event, view) => {
@@ -487,9 +301,7 @@ function setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef) {
     });
 
     ipcMain.handle('window-minimize', () => {
-        if (!mainWindow.isDestroyed()) {
-            mainWindow.minimize();
-        }
+        if (!mainWindow.isDestroyed()) mainWindow.minimize();
     });
 
     ipcMain.on('update-keybinds', (event, newKeybinds) => {
@@ -498,155 +310,83 @@ function setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef) {
         }
     });
 
-    ipcMain.handle('toggle-window-visibility', async event => {
-        try {
-            if (mainWindow.isDestroyed()) {
-                return { success: false, error: 'Window has been destroyed' };
-            }
-
-            if (mainWindow.isVisible()) {
-                mainWindow.hide();
-            } else {
-                mainWindow.showInactive();
-            }
-            return { success: true };
-        } catch (error) {
-            console.error('Error toggling window visibility:', error);
-            return { success: false, error: error.message };
-        }
+    ipcMain.handle('toggle-window-visibility', async () => {
+        if (mainWindow.isDestroyed()) return { success: false };
+        if (mainWindow.isVisible()) mainWindow.hide();
+        else mainWindow.showInactive();
+        return { success: true };
     });
 
     ipcMain.handle('toggle-screen-share-visibility', async (event, shouldShow) => {
-        try {
-            if (mainWindow.isDestroyed()) {
-                return { success: false, error: 'Window has been destroyed' };
-            }
-            if (shouldShow) {
-                mainWindow.setContentProtection(false);
-            } else {
-                mainWindow.setContentProtection(true);
-            }
-            return { success: true };
-        } catch (error) {
-            console.error('Error toggling screen share visibility:', error);
-            return { success: false, error: error.message };
-        }
+        if (mainWindow.isDestroyed()) return { success: false };
+        mainWindow.setContentProtection(!shouldShow);
+        return { success: true };
     });
 
     function animateWindowResize(mainWindow, targetWidth, targetHeight, layoutMode) {
         return new Promise(resolve => {
-            // Check if window is destroyed before starting animation
-            if (mainWindow.isDestroyed()) {
-                console.log('Cannot animate resize: window has been destroyed');
-                resolve();
-                return;
-            }
-
-            // Clear any existing animation
-            if (resizeAnimation) {
-                clearInterval(resizeAnimation);
-                resizeAnimation = null;
-            }
+            if (mainWindow.isDestroyed()) return resolve();
+            if (resizeAnimation) clearInterval(resizeAnimation);
 
             const [startWidth, startHeight] = mainWindow.getSize();
-
-            // If already at target size, no need to animate
-            if (startWidth === targetWidth && startHeight === targetHeight) {
-                console.log(`Window already at target size for ${layoutMode} mode`);
-                resolve();
-                return;
-            }
-
-            console.log(`Starting animated resize from ${startWidth}x${startHeight} to ${targetWidth}x${targetHeight}`);
+            if (startWidth === targetWidth && startHeight === targetHeight) return resolve();
 
             windowResizing = true;
             mainWindow.setResizable(true);
 
-            const frameRate = 60; // 60 FPS
+            const frameRate = 60;
             const totalFrames = Math.floor(RESIZE_ANIMATION_DURATION / (1000 / frameRate));
             let currentFrame = 0;
-
             const widthDiff = targetWidth - startWidth;
             const heightDiff = targetHeight - startHeight;
-
             const primaryDisplay = screen.getPrimaryDisplay();
             const { width: screenWidth } = primaryDisplay.workAreaSize;
 
             resizeAnimation = setInterval(() => {
                 currentFrame++;
                 const progress = currentFrame / totalFrames;
-
-                // Use easing function (ease-out)
                 const easedProgress = 1 - Math.pow(1 - progress, 3);
-
                 const currentWidth = Math.round(startWidth + widthDiff * easedProgress);
                 const currentHeight = Math.round(startHeight + heightDiff * easedProgress);
 
                 if (!mainWindow || mainWindow.isDestroyed()) {
                     clearInterval(resizeAnimation);
-                    resizeAnimation = null;
                     windowResizing = false;
                     return;
                 }
                 mainWindow.setSize(currentWidth, currentHeight);
-
-                // Re-center the window during animation
-                const x = Math.floor((screenWidth - currentWidth) / 2);
-                const y = 0;
-                mainWindow.setPosition(x, y);
+                mainWindow.setPosition(Math.floor((screenWidth - currentWidth) / 2), 0);
 
                 if (currentFrame >= totalFrames) {
                     clearInterval(resizeAnimation);
-                    resizeAnimation = null;
                     windowResizing = false;
-
-                    // Check if window is still valid before final operations
                     if (!mainWindow.isDestroyed()) {
                         mainWindow.setResizable(false);
-
-                        // Ensure final size is exact
                         mainWindow.setSize(targetWidth, targetHeight);
-                        const finalX = Math.floor((screenWidth - targetWidth) / 2);
-                        mainWindow.setPosition(finalX, 0);
+                        mainWindow.setPosition(Math.floor((screenWidth - targetWidth) / 2), 0);
                     }
-
-                    console.log(`Animation complete: ${targetWidth}x${targetHeight}`);
                     resolve();
                 }
             }, 1000 / frameRate);
         });
     }
 
-    // In setupWindowIpcHandlers, override update-sizes to always use initial size
-    ipcMain.handle('update-sizes', async event => {
-        try {
-            const targetWidth = 1100;
-            const targetHeight = 600;
-            const [currentWidth, currentHeight] = mainWindow.getSize();
-            if (windowResizing) {
-                console.log('Interrupting current resize animation');
-            }
-            await animateWindowResize(mainWindow, targetWidth, targetHeight, `forced initial size`);
-            return { success: true };
-        } catch (error) {
-            console.error('Error updating sizes:', error);
-            return { success: false, error: error.message };
-        }
+    ipcMain.handle('update-sizes', async () => {
+        await animateWindowResize(mainWindow, 1100, 600, 'forced initial size');
+        return { success: true };
     });
-}
 
-ipcMain.handle('manual-resize', async (event) => {
-    try {
+    ipcMain.handle('start-new-session', async () => ({ success: true }));
+    ipcMain.handle('close-session', async () => ({ success: true }));
+
+    ipcMain.handle('manual-resize', async () => {
         if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.setResizable(true);
             return { success: true };
         }
-        return { success: false, error: 'Window not available' };
-    } catch (e) {
-        console.error('manual-resize error', e);
-        return { success: false, error: e.message };
-    }
-});
+        return { success: false };
+    });
+}
 
 module.exports = {
     ensureDataDirectories,

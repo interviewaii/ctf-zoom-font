@@ -236,22 +236,22 @@ export class AppHeader extends LitElement {
         this.currentView = 'main';
         this.statusText = '';
         this.startTime = null;
-        this.onCustomizeClick = () => {};
-        this.onHelpClick = () => {};
-        this.onHistoryClick = () => {};
-        this.onCloseClick = () => {};
-        this.onBackClick = () => {};
-        this.onHideToggleClick = () => {};
-        this.onToggleListening = () => {};
+        this.onCustomizeClick = () => { };
+        this.onHelpClick = () => { };
+        this.onHistoryClick = () => { };
+        this.onCloseClick = () => { };
+        this.onBackClick = () => { };
+        this.onHideToggleClick = () => { };
+        this.onToggleListening = () => { };
         this.isListening = false;
         this.isClickThrough = false;
         this.advancedMode = false;
-        this.onAdvancedClick = () => {};
-        this.onLoginClick = () => {};
-        this.onUpgradeClick = () => {};
+        this.onAdvancedClick = () => { };
+        this.onLoginClick = () => { };
+        this.onUpgradeClick = () => { };
         this.isScreenShareVisible = false;
         this.isDarkMode = localStorage.getItem('isDarkMode') !== 'false'; // Default to dark mode
-        this.onToggleTheme = () => {};
+        this.onToggleTheme = () => { };
         this._timerInterval = null;
     }
 
@@ -357,7 +357,7 @@ export class AppHeader extends LitElement {
                 <div class="header-title">${this.getViewTitle()}</div>
                 <div class="header-actions">
                     ${this.currentView === 'assistant'
-                        ? html`
+                ? html`
                               <span>${elapsedTime}</span>
                               <button class="listening-toggle" @click=${this.onToggleListening} ?data-listening=${this.isListening}>
                                   ${this.isListening ? 'Stop' : 'Start'} Listening
@@ -365,13 +365,17 @@ export class AppHeader extends LitElement {
                               <span class="status-animate">${this.statusText}</span>
                               <button class="screen-share-toggle-btn" @click=${this.toggleScreenShareVisibility.bind(this)} title="${this.isScreenShareVisible ? 'Hide' : 'Reveal'}">
                                 ${this.isScreenShareVisible
-                                  ? html`<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="11" cy="11" rx="7" ry="4.5"/><circle cx="11" cy="11" r="2.2"/></svg> Reveal`
-                                  : html`<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="11" cy="11" rx="7" ry="4.5"/><path d="M4 4l14 14"/></svg> Reveal`}
+                        ? html`<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="11" cy="11" rx="7" ry="4.5"/><circle cx="11" cy="11" r="2.2"/></svg> Reveal`
+                        : html`<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="11" cy="11" rx="7" ry="4.5"/><path d="M4 4l14 14"/></svg> Reveal`}
+                              </button>
+                              <button @click=${this.onHideToggleClick} class="listening-toggle">
+                                  Hide&nbsp;&nbsp;<span class="key" style="pointer-events: none;">${window.cheddar?.isMacOS ? 'Cmd' : 'Ctrl'}</span
+                                  >&nbsp;&nbsp;<span class="key">&bsol;</span>
                               </button>
                           `
-                        : ''}
+                : ''}
                     ${this.currentView === 'main'
-                        ? html`
+                ? html`
                               <button class="icon-button" @click=${this.onHistoryClick} title="History">
                                 <svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                                   <rect x="3.5" y="4.5" width="15" height="13" rx="2.5"/>
@@ -379,18 +383,18 @@ export class AppHeader extends LitElement {
                                 </svg>
                               </button>
                               <button class="icon-button theme-toggle" @click=${this.onToggleTheme} title="${this.isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}">
-                                ${this.isDarkMode 
-                                  ? html`<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                ${this.isDarkMode
+                        ? html`<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                                       <circle cx="11" cy="11" r="5"/>
                                       <path d="M11 1v2M11 19v2M1 11h2M19 11h2M4.22 4.22l1.42 1.42M16.36 16.36l1.42 1.42M4.22 16.36l-1.42 1.42M16.36 4.22l-1.42-1.42"/>
                                     </svg>`
-                                  : html`<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        : html`<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                                       <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
                                     </svg>`
-                                }
+                    }
                               </button>
                               ${this.advancedMode
-                                  ? html`
+                        ? html`
                                         <button class="icon-button" @click=${this.onAdvancedClick} title="Advanced Tools">
                                             <?xml version="1.0" encoding="UTF-8"?><svg
                                                 width="24px"
@@ -433,7 +437,7 @@ export class AppHeader extends LitElement {
                                             </svg>
                                         </button>
                                     `
-                                  : ''}
+                        : ''}
                               <button class="icon-button" @click=${this.onCustomizeClick} title="Settings">
                                 <svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                                   <circle cx="11" cy="11" r="3.5"/>
@@ -448,42 +452,21 @@ export class AppHeader extends LitElement {
                                 </svg>
                               </button>
                           `
-                        : ''}
-                    ${this.currentView === 'assistant'
-                        ? html`
-                              <button @click=${this.onHideToggleClick} class="listening-toggle">
-                                  Hide&nbsp;&nbsp;<span class="key" style="pointer-events: none;">${window.cheddar?.isMacOS ? 'Cmd' : 'Ctrl'}</span
-                                  >&nbsp;&nbsp;<span class="key">&bsol;</span>
-                              </button>
-                              <button @click=${this.onCloseClick} class="icon-button window-close">
-                                  <?xml version="1.0" encoding="UTF-8"?><svg
-                                      width="24px"
-                                      height="24px"
-                                      stroke-width="1.7"
-                                      viewBox="0 0 24 24"
-                                      fill="none"
-                                      xmlns="http://www.w3.org/2000/svg"
-                                      color="currentColor"
-                                  >
-                                      <path
-                                          d="M6.75827 17.2426L12.0009 12M17.2435 6.75736L12.0009 12M12.0009 12L6.75827 6.75736M12.0009 12L17.2435 17.2426"
-                                          stroke="currentColor"
-                                          stroke-width="1.7"
-                                          stroke-linecap="round"
-                                          stroke-linejoin="round"
-                                      ></path>
-                                  </svg>
-                              </button>
-                          `
-                        : html`
-                              <button @click=${this.isNavigationView() ? this.onBackClick : this.onCloseClick} class="icon-button window-close" title="Close">
-                                <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-                                  <circle cx="11" cy="11" r="8.5" fill="var(--danger-color)"/>
-                                  <line x1="8.5" y1="8.5" x2="13.5" y2="13.5" stroke="var(--text-color)" stroke-width="1.5" stroke-linecap="round"/>
-                                  <line x1="13.5" y1="8.5" x2="8.5" y2="13.5" stroke="var(--text-color)" stroke-width="1.5" stroke-linecap="round"/>
-                                </svg>
-                              </button>
-                          `}
+                : ''}
+                    ${this.currentView !== 'main' ? html`
+                        <button class="icon-button" @click=${this.onBackClick} title="Back">
+                            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M19 12H5M12 19l-7-7 7-7"/>
+                            </svg>
+                        </button>
+                    ` : ''}
+                    <button @click=${this.onCloseClick} class="icon-button window-close" title="Close">
+                        <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                            <circle cx="11" cy="11" r="8.5" fill="var(--danger-color)"/>
+                            <line x1="8.5" y1="8.5" x2="13.5" y2="13.5" stroke="var(--text-color)" stroke-width="1.5" stroke-linecap="round"/>
+                            <line x1="13.5" y1="8.5" x2="8.5" y2="13.5" stroke="var(--text-color)" stroke-width="1.5" stroke-linecap="round"/>
+                        </svg>
+                    </button>
                 </div>
             </div>
         `;

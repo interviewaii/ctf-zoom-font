@@ -100,10 +100,27 @@ export class AssistantView extends LitElement {
         .red-separator {
             height: 2px;
             background: #ff4d4d;
-            margin: 15px 0;
+            margin: 32px 0;
             width: 100%;
-            box-shadow: 0 0 8px rgba(255, 77, 77, 0.4);
+            opacity: 0.8;
+            box-shadow: 0 0 10px rgba(255, 77, 77, 0.3);
             border-radius: 2px;
+        }
+
+        .response-item {
+            animation: fadeIn 0.4s ease-out;
+            margin-bottom: 8px;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .response-item.latest {
+            border-left: 2px solid var(--accent-color, #ff4d4d);
+            padding-left: 12px;
+            margin-left: -12px;
         }
 
         .text-input-container {
@@ -235,6 +252,7 @@ export class AssistantView extends LitElement {
         showShortcuts: { type: Boolean },
         responseFontSize: { type: Number },
         windowShape: { type: String },
+        liveTranscription: { type: String },
     };
 
     constructor() {
@@ -249,6 +267,7 @@ export class AssistantView extends LitElement {
         this.showShortcuts = false;
         this.responseFontSize = parseInt(localStorage.getItem('responseFontSize')) || 16;
         this.windowShape = localStorage.getItem('windowShape') || 'rounded';
+        this.liveTranscription = '';
         this._renderedMarkdownCache = new Map();
     }
 
@@ -312,7 +331,6 @@ export class AssistantView extends LitElement {
                         const index = parseInt(item.getAttribute('data-response-index'));
                         const markdownDiv = item.querySelector('.markdown-content');
                         if (markdownDiv && this.responses[index]) {
-                            // Only update if content is different from what's already there
                             const newHtml = this.renderMarkdown(this.responses[index]);
                             if (markdownDiv.innerHTML !== newHtml) {
                                 markdownDiv.innerHTML = newHtml;
@@ -323,35 +341,19 @@ export class AssistantView extends LitElement {
             }
 
             this.addCopyButtons();
-
-            const oldResponses = changedProperties.get('responses');
-            const countIncreased = !oldResponses || this.responses.length > oldResponses.length;
-
-            if (countIncreased || indexChanged) {
-                this.scrollToLatestResponse();
-            }
+            this.scrollToBottom();
         }
     }
 
-    scrollToLatestResponse() {
+    scrollToBottom() {
         requestAnimationFrame(() => {
             const container = this.shadowRoot.querySelector('.response-container');
-            if (container && this.responses.length > 0) {
-                const latestIndex = this.responses.length - 1;
-                if (latestIndex > 0) {
-                    const separators = container.querySelectorAll('.red-separator');
-                    const targetSeparator = separators[latestIndex - 1];
-                    if (targetSeparator) {
-                        const containerRect = container.getBoundingClientRect();
-                        const targetRect = targetSeparator.getBoundingClientRect();
-                        const scrollOffset = targetRect.top - containerRect.top + container.scrollTop;
-                        container.scrollTop = Math.max(0, scrollOffset - 10);
-                    } else {
-                        container.scrollTop = container.scrollHeight;
-                    }
-                } else {
-                    container.scrollTop = 0;
-                }
+            if (container) {
+                // Smooth scroll to bottom
+                container.scrollTo({
+                    top: container.scrollHeight,
+                    behavior: 'smooth'
+                });
             }
         });
     }
@@ -411,42 +413,17 @@ export class AssistantView extends LitElement {
         if (textInput && textInput.value.trim()) {
             const message = textInput.value.trim();
             textInput.value = '';
-            await this.onSendText(message);
-        }
-    }
 
-    scrollToBottom() {
-        const container = this.shadowRoot.querySelector('.response-container');
-        if (container) container.scrollTop = container.scrollHeight;
-    }
+            // Actually send the message to Gemini
+            if (window.cheatingDaddy && window.cheatingDaddy.sendTextMessage) {
+                window.cheatingDaddy.sendTextMessage(message);
+            }
 
-    adjustResponseFontSize(delta) {
-        this.responseFontSize = Math.max(10, Math.min(40, this.responseFontSize + delta));
-        localStorage.setItem('responseFontSize', this.responseFontSize);
-        this.requestUpdate();
-    }
-
-    adjustUIZoom(delta) {
-        this.dispatchEvent(new CustomEvent('adjust-zoom', {
-            detail: { delta: delta * 100 }, // Convert 0.1 to 10 for InterviewCrackerApp
-            bubbles: true,
-            composed: true
-        }));
-    }
-
-
-    toggleWindowShape() {
-        const shapes = ['square', 'rounded', 'circle'];
-        const currentIndex = shapes.indexOf(this.windowShape);
-        this.windowShape = shapes[(currentIndex + 1) % shapes.length];
-        localStorage.setItem('windowShape', this.windowShape);
-        this.requestUpdate();
-    }
-
-    manualResize() {
-        if (window.require) {
-            const { ipcRenderer } = window.require('electron');
-            ipcRenderer.invoke('manual-resize');
+            // Also ensure window is resizable if needed
+            if (window.require) {
+                const { ipcRenderer } = window.require('electron');
+                ipcRenderer.invoke('manual-resize');
+            }
         }
     }
 
@@ -544,11 +521,17 @@ export class AssistantView extends LitElement {
                 ${this.responses.length === 0 ? html`
                     <div class="response-item" style="opacity: 0.6; font-style: italic;">${defaultMessage}</div>
                 ` : this.responses.map((response, index) => html`
+                    <div class="red-separator"></div>
                     <div class="response-item ${index === this.responses.length - 1 ? 'latest' : ''}" data-response-index="${index}">
                         <div class="markdown-content"></div>
                     </div>
-                    ${index < this.responses.length - 1 ? html`<div class="red-separator"></div>` : ''}
                 `)}
+                ${this.liveTranscription ? html`
+                    <div class="response-item live-transcription" style="opacity: 0.7; font-style: italic; color: var(--accent-color, #7fbcfa); margin-top: 10px;">
+                        <span style="font-size: 0.8em; text-transform: uppercase; letter-spacing: 1px; margin-right: 8px;">Listening:</span>
+                        "${this.liveTranscription}"
+                    </div>
+                ` : ''}
             </div>
 
             <div class="text-input-container">

@@ -578,6 +578,7 @@ export class CustomizeView extends LitElement {
         backgroundTransparency: { type: Number },
         fontSize: { type: Number },
         theme: { type: String },
+        currentRPM: { type: Number },
         onProfileChange: { type: Function },
         onLanguageChange: { type: Function },
         onImageQualityChange: { type: Function },
@@ -587,6 +588,9 @@ export class CustomizeView extends LitElement {
         clearStatusMessage: { type: String },
         clearStatusType: { type: String },
         showShortcuts: { type: Boolean },
+        safetyTimeout: { type: Number },
+        followUpDelay: { type: Number },
+        silenceTrigger: { type: Number },
     };
 
     constructor() {
@@ -602,7 +606,7 @@ export class CustomizeView extends LitElement {
         this.onLayoutModeChange = () => { };
 
         // Google Search default
-        this.googleSearchEnabled = true;
+        this.googleSearchEnabled = false;
 
         // Clear data state
         this.isClearing = false;
@@ -627,8 +631,15 @@ export class CustomizeView extends LitElement {
         // Theme default
         this.theme = 'dark';
         this.showShortcuts = false;
+        this.currentRPM = 0;
+        this.rpmTimer = null;
 
         this._loadFromStorage();
+
+        // Speed settings defaults
+        this.safetyTimeout = parseFloat(localStorage.getItem('safetyTimeout') || '5');
+        this.followUpDelay = parseFloat(localStorage.getItem('followUpDelay') || '0');
+        this.silenceTrigger = parseInt(localStorage.getItem('silenceTrigger') || '400');
     }
 
     toggleShortcuts() {
@@ -654,6 +665,8 @@ export class CustomizeView extends LitElement {
             { id: 'capture', name: 'Capture', icon: 'camera' },
             { id: 'keyboard', name: 'Keyboard', icon: 'keyboard' },
             { id: 'search', name: 'Search', icon: 'search' },
+            { id: 'speed', name: 'Response Speed', icon: 'activity' },
+            { id: 'api', name: 'API Status', icon: 'activity' },
             { id: 'advanced', name: 'Advanced', icon: 'warning', danger: true },
         ];
     }
@@ -704,6 +717,9 @@ export class CustomizeView extends LitElement {
                 <line x1="12" y1="9" x2="12" y2="13"></line>
                 <line x1="12" y1="17" x2="12.01" y2="17"></line>
             </svg>`,
+            activity: html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+            </svg>`,
         };
         return icons[icon] || '';
     }
@@ -738,6 +754,20 @@ export class CustomizeView extends LitElement {
         super.connectedCallback();
         // Resize window for this view
         resizeLayout();
+
+        // Start RPM update timer
+        this.rpmTimer = setInterval(() => {
+            if (window.interviewAI && window.interviewAI.getRPM) {
+                this.currentRPM = window.interviewAI.getRPM();
+            }
+        }, 1000);
+    }
+
+    disconnectedCallback() {
+        super.disconnectedCallback();
+        if (this.rpmTimer) {
+            clearInterval(this.rpmTimer);
+        }
     }
 
     getProfiles() {
@@ -1418,6 +1448,175 @@ export class CustomizeView extends LitElement {
         `;
     }
 
+    async handleSafetyTimeoutChange(e) {
+        this.safetyTimeout = parseFloat(e.target.value);
+        localStorage.setItem('safetyTimeout', this.safetyTimeout.toString());
+        if (window.electron && window.electron.ipcRenderer) {
+            window.electron.ipcRenderer.send('update-setting-cache', { key: 'safetyTimeout', value: this.safetyTimeout.toString() });
+        }
+        this.requestUpdate();
+    }
+
+    async handleFollowUpDelayChange(e) {
+        this.followUpDelay = parseFloat(e.target.value);
+        localStorage.setItem('followUpDelay', this.followUpDelay.toString());
+        if (window.electron && window.electron.ipcRenderer) {
+            window.electron.ipcRenderer.send('update-setting-cache', { key: 'followUpDelay', value: this.followUpDelay.toString() });
+        }
+        this.requestUpdate();
+    }
+
+    async handleSilenceTriggerChange(e) {
+        this.silenceTrigger = parseInt(e.target.value);
+        localStorage.setItem('silenceTrigger', this.silenceTrigger.toString());
+        if (window.electron && window.electron.ipcRenderer) {
+            window.electron.ipcRenderer.send('update-setting-cache', { key: 'silenceTrigger', value: this.silenceTrigger.toString() });
+        }
+        this.requestUpdate();
+    }
+
+    renderSpeedSection() {
+        return html`
+            <div class="content-header">Response Speed</div>
+            <div class="form-grid">
+                <div class="form-group">
+                    <div class="slider-container">
+                        <div class="slider-header">
+                            <label class="form-label">Safety Reset Timeout</label>
+                            <span class="slider-value">${this.safetyTimeout}s</span>
+                        </div>
+                        <input
+                            type="range"
+                            class="slider-input"
+                            min="3"
+                            max="10"
+                            step="1"
+                            .value=${this.safetyTimeout}
+                            @input=${this.handleSafetyTimeoutChange}
+                        />
+                        <div class="slider-labels">
+                            <span>3s (Aggressive)</span>
+                            <span>10s (Conservative)</span>
+                        </div>
+                        <div class="form-description">
+                            How long to wait before resetting the AI if it gets stuck. Lower is faster but riskier.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-group" style="margin-top: 20px;">
+                    <div class="slider-container">
+                        <div class="slider-header">
+                            <label class="form-label">Silence Detection Trigger</label>
+                            <span class="slider-value">${this.silenceTrigger}ms</span>
+                        </div>
+                        <input
+                            type="range"
+                            class="slider-input"
+                            min="100"
+                            max="2000"
+                            step="50"
+                            .value=${this.silenceTrigger}
+                            @input=${this.handleSilenceTriggerChange}
+                        />
+                        <div class="slider-labels">
+                            <span>100ms (Instant)</span>
+                            <span>2000ms (Patient)</span>
+                        </div>
+                        <div class="form-description">
+                            How long to wait for silence before the AI starts responding.
+                            <br/><br/>
+                            <strong>📊 Recommended Settings by Speaking Speed:</strong><br/>
+                            • <strong>Fast speakers:</strong> 400-500ms<br/>
+                            • <strong>Normal speakers:</strong> 600-800ms<br/>
+                            • <strong>Slow/thoughtful speakers:</strong> 900-1200ms
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-group" style="margin-top: 20px;">
+                    <div class="slider-container">
+                        <div class="slider-header">
+                            <label class="form-label">Follow-up Protection Delay</label>
+                            <span class="slider-value">${this.followUpDelay}s</span>
+                        </div>
+                        <input
+                            type="range"
+                            class="slider-input"
+                            min="0.2"
+                            max="1.5"
+                            step="0.1"
+                            .value=${this.followUpDelay}
+                            @input=${this.handleFollowUpDelayChange}
+                        />
+                        <div class="slider-labels">
+                            <span>0.2s (Instant)</span>
+                            <span>1.5s (Safe)</span>
+                        </div>
+                        <div class="form-description">
+                            Minimum time between responses to prevent double-triggering.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    renderApiStatusSection() {
+        const maxRPM = 2000; // Assuming paid tier as per user's request
+        const usagePercent = (this.currentRPM / maxRPM) * 100;
+        const isWarning = usagePercent > 80;
+        const isCritical = usagePercent > 95;
+
+        return html`
+            <div class="content-header">API Status & Usage</div>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label class="form-label">Local Device Usage (RPM)</label>
+                    <div style="display: flex; align-items: baseline; gap: 8px; margin-top: 8px;">
+                        <span style="font-size: 32px; font-weight: 700; color: ${isCritical ? 'var(--error-color)' : isWarning ? '#f59e0b' : 'var(--success-color)'}">${this.currentRPM}</span>
+                        <span style="font-size: 14px; color: var(--text-muted);">/ ${maxRPM} RPM</span>
+                    </div>
+                    <div class="form-description">
+                        Requests Per Minute (RPM) across all active users sharing this API key.
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <div style="width: 100%; height: 8px; background: var(--bg-tertiary); border-radius: 4px; overflow: hidden; margin-top: 8px;">
+                        <div style="width: ${Math.min(100, usagePercent)}%; height: 100%; background: ${isCritical ? 'var(--error-color)' : isWarning ? '#f59e0b' : 'var(--success-color)'}; transition: width 0.3s ease;"></div>
+                    </div>
+                </div>
+
+                ${isWarning ? html`
+                    <div class="status-message ${isCritical ? 'status-error' : 'status-warning'}" style="background: ${isCritical ? 'rgba(239, 68, 68, 0.1)' : 'rgba(245, 158, 11, 0.1)'}; border-left: 3px solid ${isCritical ? 'var(--error-color)' : '#f59e0b'}; padding: 12px; margin-top: 16px;">
+                        <div style="font-weight: 600; margin-bottom: 4px; color: ${isCritical ? 'var(--error-color)' : '#f59e0b'};">
+                            ${isCritical ? 'CRITICAL: API Limit Nearly Reached' : 'WARNING: High API Usage'}
+                        </div>
+                        <div style="font-size: 11px; line-height: 1.5; color: var(--text-color);">
+                            ${isCritical
+                    ? 'The API limit is almost exhausted. Please add or switch to a new API key in gemini.js to avoid service interruption.'
+                    : 'Usage is high. If more people join, you may need to provide an additional API key.'}
+                        </div>
+                    </div>
+                ` : html`
+                    <div class="status-message status-success" style="margin-top: 16px;">
+                        API usage is within safe limits.
+                    </div>
+                `}
+
+                <div class="settings-note" style="margin-top: 24px; text-align: left; padding: 12px 0;">
+                    <strong>What counts as a request?</strong>
+                    <ul style="margin-top: 8px; padding-left: 16px; color: var(--text-muted);">
+                        <li>Each automated screenshot (every 2-5 seconds)</li>
+                        <li>Each manual screenshot analysis</li>
+                        <li>Each text message sent to the AI</li>
+                    </ul>
+                </div>
+            </div>
+        `;
+    }
+
     renderSectionContent() {
         switch (this.activeSection) {
             case 'profile':
@@ -1434,6 +1633,10 @@ export class CustomizeView extends LitElement {
                 return this.renderKeyboardSection();
             case 'search':
                 return this.renderSearchSection();
+            case 'speed':
+                return this.renderSpeedSection();
+            case 'api':
+                return this.renderApiStatusSection();
             case 'advanced':
                 return this.renderAdvancedSection();
             default:

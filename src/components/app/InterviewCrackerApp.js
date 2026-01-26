@@ -156,15 +156,18 @@ export class InterviewCrackerApp extends LitElement {
         }
 
         ::-webkit-scrollbar {
-            width: 0 !important;
-            height: 0 !important;
+            width: 8px !important;
+            height: 8px !important;
         }
 
-        ::-webkit-scrollbar-track { background: transparent !important; }
+        ::-webkit-scrollbar-track { background: rgba(0,0,0,0.05) !important; }
 
-        ::-webkit-scrollbar-thumb { background: transparent !important; border: none !important; }
+        ::-webkit-scrollbar-thumb { 
+            background: var(--primary-color, #7fbcfa) !important; 
+            border-radius: 4px !important;
+        }
 
-        ::-webkit-scrollbar-thumb:hover { background: transparent !important; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--primary-hover, #5a9bd5) !important; }
 
         ::-webkit-scrollbar-corner {
             background: transparent;
@@ -193,6 +196,8 @@ export class InterviewCrackerApp extends LitElement {
         isStreaming: { type: Boolean, state: true },
         responseFontSize: { type: Number },
         uiZoomLevel: { type: Number },
+        isTranscribing: { type: Boolean },
+        pttText: { type: String },
     };
 
     constructor() {
@@ -221,6 +226,8 @@ export class InterviewCrackerApp extends LitElement {
         this.showPaymentAlert = false;
         this.isStreaming = false;
         this._inCodeBlock = false;
+        this.isTranscribing = false;
+        this.pttText = '';
 
         // Zoom controls
         this.responseFontSize = parseInt(localStorage.getItem('responseFontSize') || '18');
@@ -276,17 +283,25 @@ export class InterviewCrackerApp extends LitElement {
         // Set up IPC listeners if needed
         if (window.require) {
             const { ipcRenderer } = window.require('electron');
-            ipcRenderer.on('update-response', (_, response) => {
-                this.setResponse(response);
+            ipcRenderer.on('new-response', (_, response) => {
+                const text = typeof response === 'object' ? response.text : response;
+                this.setResponse(text, false);
             });
-            ipcRenderer.on('update-response-stream', (_, chunk) => {
-                this.handleResponseStream(chunk);
+            ipcRenderer.on('update-response', (_, response) => {
+                const text = typeof response === 'object' ? response.text : response;
+                this.setResponse(text, true);
             });
             ipcRenderer.on('update-status', (_, status) => {
                 this.setStatus(status);
             });
             ipcRenderer.on('click-through-toggled', (_, isEnabled) => {
                 this._isClickThrough = isEnabled;
+            });
+            ipcRenderer.on('update-transcription', (_, text) => {
+                if (this.isTranscribing) {
+                    this.pttText += text + ' ';
+                    this.requestUpdate();
+                }
             });
 
 
@@ -405,6 +420,34 @@ export class InterviewCrackerApp extends LitElement {
         this.statusText = text;
     }
 
+    async handlePTTStart() {
+        console.log('PTT Start');
+        this.isTranscribing = true;
+        this.pttText = '';
+
+        // Ensure we are listening
+        if (!this.isListening) {
+            await this.handleToggleListening();
+        }
+
+        this.requestUpdate();
+    }
+
+    async handlePTTStop() {
+        console.log('PTT Stop');
+        const finalPttText = this.pttText.trim();
+        this.isTranscribing = false;
+
+        if (finalPttText.length > 5) {
+            console.log('Sending PTT transcription to AI:', finalPttText);
+            this.handleSendText(finalPttText);
+        } else {
+            console.log('PTT text too short, ignoring');
+        }
+
+        this.requestUpdate();
+    }
+
     adjustResponseFontSize(delta) {
         const newSize = Math.max(12, Math.min(32, this.responseFontSize + delta));
         if (newSize !== this.responseFontSize) {
@@ -440,23 +483,29 @@ export class InterviewCrackerApp extends LitElement {
         } else {
             document.body.style.zoom = zoomFactor;
         }
-
-        // Also apply scale to container as a fallback/visual aid if needed, 
-        // but setZoomFactor is the primary method now.
-        const container = this.shadowRoot?.querySelector('.window-container');
-        if (container) {
-            // container.style.transform = `scale(${zoomFactor})`;
-            // container.style.transformOrigin = 'top center';
-        }
     }
 
-    setResponse(response) {
-        // If we were streaming, the last response is already this one (mostly)
-        // We replace it with the final version to ensure correctness
-        if (this.isStreaming && this.responses.length > 0) {
-            this.responses[this.responses.length - 1] = response;
-            this.isStreaming = false;
-            this._inCodeBlock = false;
+    addNewResponse(response) {
+        const text = typeof response === 'object' ? response.text : response;
+        this.setResponse(text, false);
+    }
+
+    updateCurrentResponse(response) {
+        const text = typeof response === 'object' ? response.text : response;
+        this.setResponse(text, true);
+    }
+
+    setResponse(text, isUpdate = false) {
+        // Clear any pending stream updates to prevent race conditions
+        if (this._streamThrottleTimeout) {
+            clearTimeout(this._streamThrottleTimeout);
+            this._streamThrottleTimeout = null;
+        }
+        this._streamBuffer = '';
+
+        if (isUpdate && this.responses.length > 0) {
+            // Update the last response
+            this.responses[this.responses.length - 1] = text;
             this.responses = [...this.responses]; // Force update
         } else {
             // Only check license limits if user is already activated
@@ -469,7 +518,7 @@ export class InterviewCrackerApp extends LitElement {
                 }
             }
 
-            this.responses.push(response);
+            this.responses.push(text);
             this.responses = [...this.responses]; // Force update for child components
 
             // Track response for license limits (only if activated)
@@ -492,6 +541,10 @@ export class InterviewCrackerApp extends LitElement {
                 this.currentResponseIndex = this.responses.length - 1;
             }
         }
+
+        // Reset streaming state if this was a final update
+        this.isStreaming = false;
+        this._inCodeBlock = false;
 
         // Hide loading indicator when response is received
         if (window.setScreenshotProcessing) {
@@ -518,7 +571,7 @@ export class InterviewCrackerApp extends LitElement {
                     this._applyStreamChunk(this._streamBuffer);
                     this._streamBuffer = '';
                 }
-            }, 100);
+            }, 30);
             return;
         }
 
@@ -529,7 +582,7 @@ export class InterviewCrackerApp extends LitElement {
             if (bufferedChunk) {
                 this._applyStreamChunk(bufferedChunk);
             }
-        }, 100);
+        }, 30);
     }
 
     _applyStreamChunk(chunk) {
@@ -869,9 +922,6 @@ export class InterviewCrackerApp extends LitElement {
     }
 
     renderCurrentView() {
-        // Only re-render the view if it hasn't been cached or if critical properties changed
-        const viewKey = `${this.currentView}-${this.selectedProfile}-${this.selectedLanguage}`;
-
         switch (this.currentView) {
             case 'onboarding':
                 return html`
@@ -946,8 +996,7 @@ export class InterviewCrackerApp extends LitElement {
     }
 
     render() {
-        const mainContentClass = `main-content ${this.currentView === 'assistant' ? 'assistant-view' : this.currentView === 'onboarding' ? 'onboarding-view' : 'with-border'
-            }`;
+        const mainContentClass = `main-content ${this.currentView === 'assistant' ? 'assistant-view' : this.currentView === 'onboarding' ? 'onboarding-view' : 'with-border'}`;
 
         return html`
             <div class="window-container">
@@ -988,7 +1037,6 @@ export class InterviewCrackerApp extends LitElement {
             </div>
         `;
     }
-
 
     updateLayoutMode() {
         // Apply or remove compact layout class to document root
@@ -1050,8 +1098,6 @@ export class InterviewCrackerApp extends LitElement {
             console.log('Theme toggled to:', this.isDarkMode ? 'dark' : 'light');
         } catch (error) {
             console.error('Error toggling theme:', error);
-            // Revert on error
-            this.isDarkMode = !this.isDarkMode;
         }
     }
 
