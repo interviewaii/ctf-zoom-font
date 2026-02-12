@@ -578,11 +578,14 @@ export class CustomizeView extends LitElement {
         backgroundTransparency: { type: Number },
         fontSize: { type: Number },
         theme: { type: String },
+        resumeContext: { type: String },
         onProfileChange: { type: Function },
         onLanguageChange: { type: Function },
         onImageQualityChange: { type: Function },
         onLayoutModeChange: { type: Function },
         activeSection: { type: String },
+        audioChunkSpeed: { type: String },
+        responseSpeed: { type: String },
         isClearing: { type: Boolean },
         clearStatusMessage: { type: String },
         clearStatusType: { type: String },
@@ -601,6 +604,9 @@ export class CustomizeView extends LitElement {
         this.onImageQualityChange = () => { };
         this.onLayoutModeChange = () => { };
 
+        // Resume context default
+        this.resumeContext = '';
+
         // Google Search default
         this.googleSearchEnabled = true;
 
@@ -617,6 +623,8 @@ export class CustomizeView extends LitElement {
 
         // Audio mode default
         this.audioMode = 'speaker_only';
+        this.audioChunkSpeed = '1';
+        this.responseSpeed = '2';
 
         // Custom prompt
         this.customPrompt = '';
@@ -719,7 +727,10 @@ export class CustomizeView extends LitElement {
             this.backgroundTransparency = prefs.backgroundTransparency ?? 0.8;
             this.fontSize = prefs.fontSize ?? 20;
             this.audioMode = prefs.audioMode ?? 'speaker_only';
+            this.audioChunkSpeed = prefs.audioChunkSpeed ?? '1';
+            this.responseSpeed = prefs.responseSpeed ?? '2';
             this.customPrompt = prefs.customPrompt ?? '';
+            this.resumeContext = prefs.resumeContext ?? '';
             this.theme = prefs.theme ?? 'dark';
 
             if (keybinds) {
@@ -846,9 +857,26 @@ export class CustomizeView extends LitElement {
         await window.interviewAI.storage.updatePreference('customPrompt', e.target.value);
     }
 
+    async handleResumeContextInput(e) {
+        this.resumeContext = e.target.value;
+        await window.interviewAI.storage.updatePreference('resumeContext', e.target.value);
+    }
+
     async handleAudioModeSelect(e) {
         this.audioMode = e.target.value;
         await window.interviewAI.storage.updatePreference('audioMode', e.target.value);
+        this.requestUpdate();
+    }
+
+    async handleAudioChunkSpeedSelect(e) {
+        this.audioChunkSpeed = e.target.value;
+        await window.interviewAI.storage.updatePreference('audioChunkSpeed', e.target.value);
+        this.requestUpdate();
+    }
+
+    async handleResponseSpeedSelect(e) {
+        this.responseSpeed = e.target.value;
+        await window.interviewAI.storage.updatePreference('responseSpeed', e.target.value);
         this.requestUpdate();
     }
 
@@ -1144,17 +1172,30 @@ export class CustomizeView extends LitElement {
                         </select>
                     </div>
 
+                    <div class="form-group">
+                        <label class="form-label">Resume / Job Context</label>
+                        <textarea
+                            class="form-control"
+                            style="min-height: 120px;"
+                            placeholder="Paste your RESUME, JOB DESCRIPTION, or key details here. The AI will use this context to tailor its answers..."
+                            .value=${this.resumeContext}
+                            @input=${this.handleResumeContextInput}
+                        ></textarea>
+                        <div class="form-description">
+                            Paste your resume or job details here. The AI will ALWAYS retain this context.
+                        </div>
+                    </div>
+
                     <div class="form-group expand">
                         <label class="form-label">Custom AI Instructions</label>
                         <textarea
                             class="form-control"
-                            placeholder="Add specific instructions for how you want the AI to behave during ${profileNames[this.selectedProfile] || 'this interaction'
-            }..."
+                            placeholder="Add specific instructions for how you want the AI to behave (e.g., 'Be concise', 'Speak like a senior engineer')..."
                             .value=${this.customPrompt}
                             @input=${this.handleCustomPromptInput}
                         ></textarea>
                         <div class="form-description">
-                            Personalize the AI's behavior with specific instructions
+                            Specific behavior instructions for the AI model.
                         </div>
                     </div>
                 </div>
@@ -1175,6 +1216,34 @@ export class CustomizeView extends LitElement {
                     </select>
                     <div class="form-description">
                         Choose which audio sources to capture for the AI.
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Audio Chunk Speed (Latency)</label>
+                    <select class="form-control" .value=${this.audioChunkSpeed} @change=${this.handleAudioChunkSpeedSelect}>
+                        <option value="1">30ms - Extreme Fast (Recommended)</option>
+                        <option value="1.5">50ms - Very Fast</option>
+                        <option value="2">70ms - Fast</option>
+                        <option value="2.5">80ms - Balanced</option>
+                        <option value="3">100ms - Stable</option>
+                        <option value="3.5">150ms - Slow</option>
+                        <option value="4">270ms - Very Slow</option>
+                    </select>
+                    <div class="form-description">
+                        Faster chunks result in lower latency but may increase CPU usage.
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Response Speed</label>
+                    <select class="form-control" .value=${this.responseSpeed} @change=${this.handleResponseSpeedSelect}>
+                        <option value="1">⚡ Fast (1 second)</option>
+                        <option value="2">⚙️ Medium (2 seconds)</option>
+                        <option value="3">🐢 Slow (3 seconds)</option>
+                    </select>
+                    <div class="form-description">
+                        How quickly the AI responds to your voice. Faster = more eager to respond.
                     </div>
                 </div>
             </div>

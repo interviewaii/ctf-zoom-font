@@ -8,8 +8,8 @@ let audioProcessor = null;
 let micAudioProcessor = null;
 let audioBuffer = [];
 const SAMPLE_RATE = 24000;
-const AUDIO_CHUNK_DURATION = 0.02; // seconds - extreme speed
-const BUFFER_SIZE = 1024; // Minimal buffer size for lowest possible latency (~42ms)
+let AUDIO_CHUNK_DURATION = 0.1; // Default
+const BUFFER_SIZE = 1024;
 
 let hiddenVideo = null;
 let offscreenCanvas = null;
@@ -139,8 +139,28 @@ function arrayBufferToBase64(buffer) {
 }
 
 async function initializeGemini(profile = 'interview', language = 'en-US') {
-    // Pass profile and language first, then customPrompt, and null for apiKey to use rotation
-    const success = await ipcRenderer.invoke('initialize-gemini', profile, language, localStorage.getItem('customPrompt') || '', null);
+    // Get audio chunk duration from settings
+    const audioChunkSpeed = localStorage.getItem('audioChunkSpeed') || '1';
+    const speedMultiplier = {
+        '1': 0.03,   // 30ms
+        '1.5': 0.05, // 50ms
+        '2': 0.07,   // 70ms
+        '2.5': 0.08, // 80ms
+        '3': 0.1,    // 100ms
+        '3.5': 0.15, // 150ms
+        '4': 0.27    // 270ms
+    };
+    AUDIO_CHUNK_DURATION = speedMultiplier[audioChunkSpeed] || 0.03;
+    console.log(`Audio chunk duration set to: ${AUDIO_CHUNK_DURATION}s (Speed: ${audioChunkSpeed})`);
+
+    // Pass profile and language first, then customPrompt, resumeContext, and null for apiKey to use rotation
+    const success = await ipcRenderer.invoke('initialize-gemini',
+        profile,
+        language,
+        localStorage.getItem('customPrompt') || '',
+        localStorage.getItem('resumeContext') || '',
+        null
+    );
     if (success) {
         interviewCrackerElement().setStatus('Live');
     } else {
@@ -154,12 +174,33 @@ ipcRenderer.on('update-status', (event, status) => {
     interviewCrackerElement().setStatus(status);
 });
 
-// Listen for responses - REMOVED: This is handled in InterviewCrackerApp.js to avoid duplicates
-// ipcRenderer.on('update-response', (event, response) => {
-//     console.log('Gemini response:', response);
-//     cheddar.e().setResponse(response);
-//     // You can add UI elements to display the response if needed
-// });
+// Listen for new response from main process
+ipcRenderer.on('new-response', (event, text) => {
+    console.log('📝 [RENDERER] Received new response');
+    const assistantView = document.querySelector('assistant-view');
+    if (assistantView) {
+        assistantView.handleNewResponse(event, text);
+    }
+});
+
+// Listen for response updates (streaming)
+ipcRenderer.on('update-response', (event, text) => {
+    const assistantView = document.querySelector('assistant-view');
+    if (assistantView) {
+        assistantView.handleUpdateResponse(event, text);
+    }
+});
+
+// Listen for scrolling events
+ipcRenderer.on('scroll-response-up', () => {
+    const assistantView = document.querySelector('assistant-view');
+    if (assistantView) assistantView.scrollResponseUp();
+});
+
+ipcRenderer.on('scroll-response-down', () => {
+    const assistantView = document.querySelector('assistant-view');
+    if (assistantView) assistantView.scrollResponseDown();
+});
 
 async function startCapture(screenshotIntervalSeconds = 2, imageQuality = 'medium') {
     // Store the image quality for manual screenshots
@@ -698,7 +739,9 @@ window.interviewAI = window.interviewCracker = {
                 backgroundTransparency: parseFloat(localStorage.getItem('backgroundTransparency') || '0.8'),
                 fontSize: parseInt(localStorage.getItem('fontSize') || '20', 10),
                 audioMode: localStorage.getItem('audioMode') || 'speaker_only',
+                audioChunkSpeed: localStorage.getItem('audioChunkSpeed') || '1',
                 customPrompt: localStorage.getItem('customPrompt') || '',
+                resumeContext: localStorage.getItem('resumeContext') || '',
                 theme: localStorage.getItem('theme') || 'dark'
             };
         },

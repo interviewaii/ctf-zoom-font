@@ -4,9 +4,11 @@ const { spawn } = require('child_process');
 const { saveDebugAudio } = require('../audioUtils');
 const { getSystemPrompt } = require('./prompts');
 
+require('dotenv').config();
+
 // API Keys for rotation
 const API_KEYS = [
-    'AIzaSyBivEvTpvGpZJgqlHyU3-7hQDexi7cow6s',
+    process.env.GEMINI_API_KEY || 'AIzaSyBivEvTpvGpZJgqlHyU3-7hQDexi7cow6s',
     'AIzaSyDin5_72rCSSjCHw93DejGfZLt783iUEe0',
     'AIzaSyCHjyKxKLGP1NEaah3oyU2t64LG6b8BMMQ',
     'AIzaSyBd6PruB7A-x6yG9XGFU3HklgZdlzjMt9M'
@@ -76,35 +78,10 @@ function getCurrentSessionData() {
 }
 
 async function sendReconnectionContext() {
-    if (!global.geminiSessionRef?.current || conversationHistory.length === 0) {
-        return;
-    }
-
-    try {
-        // Gather all transcriptions from the conversation history
-        const transcriptions = conversationHistory
-            .map(turn => turn.transcription)
-            .filter(transcription => transcription && transcription.trim().length > 0)
-            .slice(-5); // Only send last 5 for speed
-
-        if (transcriptions.length === 0) {
-            return;
-        }
-
-        // Create the context message
-        const contextMessage = `Till now all these questions were asked in the interview, answer the last one please:\n\n${transcriptions.join('\n')}`;
-
-        console.log('Sending reconnection context with', transcriptions.length, 'previous questions');
-
-        // Send the context message to the new session
-        lastRequestTime = Date.now();
-        isFirstChunk = true;
-        await global.geminiSessionRef.current.sendRealtimeInput({
-            text: contextMessage,
-        });
-    } catch (error) {
-        console.error('Error sending reconnection context:', error);
-    }
+    // INTENTIONALLY DISABLED to prevent context bleeding
+    // We want the model to treat every session as a fresh start for new questions
+    console.log('Reconnection context disabled to ensure question independence.');
+    return;
 }
 
 async function getEnabledTools() {
@@ -156,6 +133,31 @@ async function getStoredSetting(key, defaultValue) {
     return defaultValue;
 }
 
+function getSpeedConfig(speedSetting) {
+    // Speed setting: '1' = Fast, '2' = Medium (default), '3' = Slow
+    const configs = {
+        '1': {
+            name: 'Fast',
+            silenceThreshold: 0.8, // More sensitive to silence
+            description: '~1 second response time'
+        },
+        '2': {
+            name: 'Medium',
+            silenceThreshold: 1.0, // Default sensitivity
+            description: '~2 second response time'
+        },
+        '3': {
+            name: 'Slow',
+            silenceThreshold: 1.5, // Less sensitive, waits longer
+            description: '~3 second response time'
+        }
+    };
+
+    const config = configs[speedSetting] || configs['2'];
+    console.log(`Response speed configured: ${config.name} (${config.description})`);
+    return config;
+}
+
 async function attemptReconnection() {
     if (!lastSessionParams || reconnectionAttempts >= maxReconnectionAttempts) {
         console.log('Max reconnection attempts reached or no session params stored');
@@ -173,6 +175,7 @@ async function attemptReconnection() {
         const session = await initializeGeminiSession(
             lastSessionParams.apiKey,
             lastSessionParams.customPrompt,
+            lastSessionParams.resumeContext,
             lastSessionParams.profile,
             lastSessionParams.language,
             true // isReconnection flag
@@ -202,7 +205,7 @@ async function attemptReconnection() {
     }
 }
 
-async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'interview', language = 'en-US', isReconnection = false) {
+async function initializeGeminiSession(apiKey, customPrompt = '', resumeContext = '', profile = 'interview', language = 'en-US', isReconnection = false) {
     if (isInitializingSession) {
         console.log('Session initialization already in progress');
         return false;
@@ -216,6 +219,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
         lastSessionParams = {
             apiKey,
             customPrompt,
+            resumeContext,
             profile,
             language,
         };
@@ -226,6 +230,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
     const effectiveApiKey = apiKey || API_KEYS[currentKeyIndex];
     console.log(`Using API Key index: ${currentKeyIndex}`);
 
+    // COMPLETELY NEW CLIENT INSTANCE for every session to prevent state leakage
     const client = new GoogleGenAI({
         vertexai: false,
         apiKey: effectiveApiKey,
@@ -235,15 +240,30 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
     const enabledTools = await getEnabledTools();
     const googleSearchEnabled = enabledTools.some(tool => tool.googleSearch);
 
-    const systemPrompt = getSystemPrompt(profile, customPrompt, googleSearchEnabled);
+    // Get response speed configuration
+    const responseSpeed = await getStoredSetting('responseSpeed', '2');
+    const speedConfig = getSpeedConfig(responseSpeed);
+
+    const systemPrompt = getSystemPrompt(profile, customPrompt, resumeContext, googleSearchEnabled);
 
     // Initialize new conversation session (only if not reconnecting)
     if (!isReconnection) {
         initializeNewSession();
+        // FORCE CLEAN SLATE: If there's an existing session, kill it.
+        if (global.geminiSessionRef && global.geminiSessionRef.current) {
+            console.log('Force-closing previous session for clean slate.');
+            try {
+                // We rely on the garbage collector mostly, but setting to null helps
+                global.geminiSessionRef.current = null;
+            } catch (e) {
+                console.error('Error clearing previous session:', e);
+            }
+        }
     }
 
+    const modelName = process.env.GEMINI_MODEL || 'gemini-2.0-flash-exp';
     try {
-        console.log('Initializing Gemini session with model: gemini-2.0-flash-exp');
+        console.log(`Initializing Gemini session with model: ${modelName}`);
         const keyToMask = effectiveApiKey || 'undefined';
         const maskedKey = keyToMask !== 'undefined' ? `${keyToMask.substring(0, 4)}...${keyToMask.substring(keyToMask.length - 4)}` : 'undefined';
         console.log('API Key (masked):', maskedKey);
@@ -257,10 +277,11 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
         }
 
         const session = await client.live.connect({
-            model: 'gemini-2.0-flash-exp',
+            model: modelName,
             callbacks: {
                 onopen: function () {
                     console.log('Gemini Live session opened successfully');
+                    console.log('VAD configured: silenceDurationMs=300, EndSensitivity=HIGH');
                     sendToRenderer('update-status', 'Live session connected');
                 },
                 onmessage: function (message) {
@@ -274,20 +295,72 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
 
                     // Handle AI model response
                     if (message.serverContent?.modelTurn?.parts) {
-                        let timingPrefix = '';
-                        if (isFirstChunk && lastRequestTime) {
-                            const duration = (Date.now() - lastRequestTime) / 1000;
-                            const durationStr = duration.toFixed(1);
-                            sendToRenderer('response-time', durationStr);
-                            timingPrefix = `[${durationStr}s] `; // Prepend timing to the first chunk
-                            isFirstChunk = false;
-                        }
                         for (const part of message.serverContent.modelTurn.parts) {
                             if (part.text) {
-                                const fullText = timingPrefix + part.text;
-                                timingPrefix = '';
-                                messageBuffer += fullText;
+                                // Filter out internal monologue/thinking lines
+                                // Split by newlines to handle multi-line chunks correctly
 
+                                // Split by newlines to handle multi-line chunks correctly
+                                const lines = part.text.split('\n');
+                                const cleanedLines = [];
+
+                                // Ultra-comprehensive thinking patterns to catch ALL variations
+                                const thinkingPatterns = [
+                                    // Original patterns
+                                    /^(\*\*|#|##)?\s*(Relating|Connecting|Framing|Assessing|Understanding|Zeroing|Reflecting|Defining|Refining|Crafting|Interpreting|Solidifying|Analyzing|Strategy|Strategies|Strategizing|Thinking|Planning|Formulating|Consolidating|Breaking down|Expanding|Clarifying|Contextualizing|Developing|Delivering|Final|Structuring|Elaborating|Composing|I('ve)? (refined|explored|crafted|drafted|structured|created|finalized|finalise|ready|prepared|broken down|outlined|completed|selected|formatted))/i,
+                                    /^I('m| am) (now|currently|refining|concentrating|tailoring|highlighting|focusing|emphasizing|planning|satisfied|presenting|elaborating|thinking|reflecting|zeroing|connecting|relating|formulating|starting|distilling|crafting|focused)/i,
+                                    /^I (plan to|will|have) (mention|state|explain|highlight|include|outlined|crafted|prepared|completed|selected|verified|generated|removed|ensured|considered|successfully)/i,
+                                    /^My (focus|goal|plan|aim|instruction|latest focus|approach|thoughts|task) (is|are|was|were|expands|now)/i,
+                                    /^Assuming (a|the) (standard|professional|level)/i,
+                                    /^(Key features include|The summary|The response|This response|I'll then|I'll highlight|I've highlighted|I am now incorporating)/i,
+                                    /^(The focus is on|My latest focus)/i,
+                                    // Catch "Generating" at start of line
+                                    /^Generating/i,
+                                    // Catch "My task is" or "My task was"
+                                    /^My task (is|was)/i,
+                                    // Catch "I have generated" or "I have successfully"
+                                    /^I have (generated|successfully|removed|ensured|considered|selected|formatted)/i,
+                                    // Catch any line with "adhering to all instructions" or similar
+                                    /(adhering to|fulfills all|meets all|all requirements|all instructions|all specifications)/i,
+                                    // Catch "making it ready for presentation"
+                                    /(ready for presentation|ready for|making it)/i,
+                                    // Catch "The response is concise" or similar self-assessment
+                                    /^The response (is|was|fulfills|meets)/i,
+                                    // Catch "I considered all the elements"
+                                    /I considered/i,
+                                    // Catch any line starting with "Each bullet point"
+                                    /^Each bullet/i
+                                ];
+
+                                for (const line of lines) {
+                                    let isThinkingLine = false;
+                                    for (const pattern of thinkingPatterns) {
+                                        if (pattern.test(line)) {
+                                            console.log('Stripped thinking line:', line);
+                                            isThinkingLine = true;
+                                            break;
+                                        }
+                                    }
+                                    if (!isThinkingLine) {
+                                        cleanedLines.push(line);
+                                    }
+                                }
+
+                                const cleanedText = cleanedLines.join('\n');
+
+                                if (cleanedText.trim().length === 0) {
+                                    // If the entire chunk was thinking lines, skip it
+                                    continue;
+                                }
+
+                                let timingPrefix = '';
+                                if (messageBuffer === '' && lastRequestTime) {
+                                    const duration = (Date.now() - lastRequestTime) / 1000;
+                                    timingPrefix = `[${duration.toFixed(1)}s] `;
+                                }
+
+                                const fullText = timingPrefix + cleanedText;
+                                messageBuffer += fullText;
                                 sendToRenderer('update-response-stream', fullText);
                             }
                         }
@@ -374,12 +447,23 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                 },
             },
             config: {
-                responseModalities: ['TEXT'],
+                realtimeInputConfig: {
+                    automaticActivityDetection: {
+                        disabled: false,
+                        // Shorter silence duration = faster response (300ms instead of default ~1000ms)
+                        startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
+                        endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+                        prefixPaddingMs: 100,
+                        silenceDurationMs: 300,
+                    }
+                },
+                responseModalities: ['AUDIO'],
                 tools: enabledTools,
-                inputAudioTranscription: { enabled: true },
-                temperature: 0.1,
-                candidateCount: 1,
-                speechConfig: { languageCode: language },
+                inputAudioTranscription: {}, // Ensure this is enabled for voice
+                speechConfig: {
+                    voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } },
+                    languageCode: language
+                },
                 systemInstruction: {
                     parts: [{ text: systemPrompt }],
                 },
@@ -481,7 +565,20 @@ async function startMacOSAudioCapture(geminiSessionRef) {
 
     console.log('SystemAudioDump started with PID:', systemAudioProc.pid);
 
-    const CHUNK_DURATION = 0.1;
+    // Get audio chunk speed setting (1-4 scale with 0.5 increments)
+    const audioChunkSpeed = await getStoredSetting('audioChunkSpeed', '1');
+    const speedMultiplier = {
+        '1': 0.03,   // 30ms chunks - Fastest (Google recommended)
+        '1.5': 0.05, // 50ms chunks
+        '2': 0.07,   // 70ms chunks
+        '2.5': 0.08, // 80ms chunks
+        '3': 0.1,    // 100ms chunks - Original default
+        '3.5': 0.15, // 150ms chunks
+        '4': 0.27    // 270ms chunks - Slowest
+    };
+    const CHUNK_DURATION = speedMultiplier[audioChunkSpeed] || 0.03;
+    console.log(`Audio chunk speed: ${audioChunkSpeed} (${CHUNK_DURATION * 1000}ms chunks)`);
+
     const SAMPLE_RATE = 24000;
     const BYTES_PER_SAMPLE = 2;
     const CHANNELS = 2;
@@ -569,9 +666,9 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
     // Store the geminiSessionRef globally for reconnection access
     global.geminiSessionRef = geminiSessionRef;
 
-    ipcMain.handle('initialize-gemini', async (event, profile = 'interview', language = 'en-US', customPrompt = '', apiKey = null) => {
-        console.log('IPC initialize-gemini called with:', { profile, language, hasCustomPrompt: !!customPrompt, hasApiKey: !!apiKey });
-        const session = await initializeGeminiSession(apiKey, customPrompt, profile, language);
+    ipcMain.handle('initialize-gemini', async (event, profile = 'interview', language = 'en-US', customPrompt = '', resumeContext = '', apiKey = null) => {
+        console.log('IPC initialize-gemini called with:', { profile, language, hasCustomPrompt: !!customPrompt, hasResume: !!resumeContext, hasApiKey: !!apiKey });
+        const session = await initializeGeminiSession(apiKey, customPrompt, resumeContext, profile, language);
         if (session) {
             geminiSessionRef.current = session;
             return true;
