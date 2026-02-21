@@ -5,6 +5,20 @@ const { spawn } = require('child_process');
 const { saveDebugAudio } = require('../audioUtils');
 const { getSystemPrompt } = require('./prompts');
 
+<<<<<<< HEAD
+=======
+require('dotenv').config();
+
+// API Keys for rotation
+const API_KEYS = [
+    process.env.GEMINI_API_KEY || 'AIzaSyBivEvTpvGpZJgqlHyU3-7hQDexi7cow6s',
+    'AIzaSyDin5_72rCSSjCHw93DejGfZLt783iUEe0',
+    'AIzaSyCHjyKxKLGP1NEaah3oyU2t64LG6b8BMMQ',
+    'AIzaSyBd6PruB7A-x6yG9XGFU3HklgZdlzjMt9M'
+];
+let currentKeyIndex = 0;
+
+>>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
 // Conversation tracking variables
 let currentSessionId = null;
 let currentTranscription = '';
@@ -164,6 +178,16 @@ function getCurrentSessionData() {
     };
 }
 
+<<<<<<< HEAD
+=======
+async function sendReconnectionContext() {
+    // INTENTIONALLY DISABLED to prevent context bleeding
+    // We want the model to treat every session as a fresh start for new questions
+    console.log('Reconnection context disabled to ensure question independence.');
+    return;
+}
+
+>>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
 async function getEnabledTools() {
     const tools = [];
     const googleSearchEnabled = await getStoredSetting('googleSearchEnabled', 'false');
@@ -206,15 +230,109 @@ async function getStoredSetting(key, defaultValue) {
     return defaultValue;
 }
 
+<<<<<<< HEAD
 async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'interview', language = 'en-US', isReconnect = false) {
     if (isInitializingSession) return { success: false, error: 'Initialization already in progress' };
+=======
+function getSpeedConfig(speedSetting) {
+    // Speed setting: '1' = Fast, '2' = Medium (default), '3' = Slow
+    const configs = {
+        '1': {
+            name: 'Fast',
+            silenceThreshold: 0.8, // More sensitive to silence
+            description: '~1 second response time'
+        },
+        '2': {
+            name: 'Medium',
+            silenceThreshold: 1.0, // Default sensitivity
+            description: '~2 second response time'
+        },
+        '3': {
+            name: 'Slow',
+            silenceThreshold: 1.5, // Less sensitive, waits longer
+            description: '~3 second response time'
+        }
+    };
+
+    const config = configs[speedSetting] || configs['2'];
+    console.log(`Response speed configured: ${config.name} (${config.description})`);
+    return config;
+}
+
+async function attemptReconnection() {
+    if (!lastSessionParams || reconnectionAttempts >= maxReconnectionAttempts) {
+        console.log('Max reconnection attempts reached or no session params stored');
+        sendToRenderer('update-status', 'Session closed');
+        return false;
+    }
+
+    reconnectionAttempts++;
+    console.log(`Attempting reconnection ${reconnectionAttempts}/${maxReconnectionAttempts}...`);
+
+    // Wait before attempting reconnection
+    await new Promise(resolve => setTimeout(resolve, reconnectionDelay));
+
+    try {
+        const session = await initializeGeminiSession(
+            lastSessionParams.apiKey,
+            lastSessionParams.customPrompt,
+            lastSessionParams.resumeContext,
+            lastSessionParams.profile,
+            lastSessionParams.language,
+            true // isReconnection flag
+        );
+
+        if (session && global.geminiSessionRef) {
+            global.geminiSessionRef.current = session;
+            reconnectionAttempts = 0; // Reset counter on successful reconnection
+            console.log('Live session reconnected');
+
+            // Send context message with previous transcriptions
+            await sendReconnectionContext();
+
+            return true;
+        }
+    } catch (error) {
+        console.error(`Reconnection attempt ${reconnectionAttempts} failed:`, error);
+    }
+
+    // If this attempt failed, try again
+    if (reconnectionAttempts < maxReconnectionAttempts) {
+        return attemptReconnection();
+    } else {
+        console.log('All reconnection attempts failed');
+        sendToRenderer('update-status', 'Session closed');
+        return false;
+    }
+}
+
+async function initializeGeminiSession(apiKey, customPrompt = '', resumeContext = '', profile = 'interview', language = 'en-US', isReconnection = false) {
+    if (isInitializingSession) {
+        console.log('Session initialization already in progress');
+        return false;
+    }
+
+>>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
     isInitializingSession = true;
 
+<<<<<<< HEAD
     // Refresh settings cache on session start
     settingsCache = {};
     const keysToCache = ['safetyTimeout', 'followUpDelay', 'silenceTrigger', 'googleSearchEnabled', 'apiKey'];
     for (const key of keysToCache) {
         await getStoredSetting(key, '');
+=======
+    // Store session parameters for reconnection (only if not already reconnecting)
+    if (!isReconnection) {
+        lastSessionParams = {
+            apiKey,
+            customPrompt,
+            resumeContext,
+            profile,
+            language,
+        };
+        reconnectionAttempts = 0; // Reset counter for new session
+>>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
     }
 
     if (!apiKey) {
@@ -238,6 +356,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
         initializeNewSession(profile, customPrompt);
     }
 
+    // COMPLETELY NEW CLIENT INSTANCE for every session to prevent state leakage
     const client = new GoogleGenAI({
         vertexai: false,
         apiKey: apiKey,
@@ -245,14 +364,61 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
     });
 
     const enabledTools = await getEnabledTools();
+<<<<<<< HEAD
     const systemPrompt = getSystemPrompt(profile, customPrompt, enabledTools.some(t => t.googleSearch));
+=======
+    const googleSearchEnabled = enabledTools.some(tool => tool.googleSearch);
 
+    // Get response speed configuration
+    const responseSpeed = await getStoredSetting('responseSpeed', '2');
+    const speedConfig = getSpeedConfig(responseSpeed);
+
+    const systemPrompt = getSystemPrompt(profile, customPrompt, resumeContext, googleSearchEnabled);
+
+    // Initialize new conversation session (only if not reconnecting)
+    if (!isReconnection) {
+        initializeNewSession();
+        // FORCE CLEAN SLATE: If there's an existing session, kill it.
+        if (global.geminiSessionRef && global.geminiSessionRef.current) {
+            console.log('Force-closing previous session for clean slate.');
+            try {
+                // We rely on the garbage collector mostly, but setting to null helps
+                global.geminiSessionRef.current = null;
+            } catch (e) {
+                console.error('Error clearing previous session:', e);
+            }
+        }
+    }
+>>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
+
+    const modelName = process.env.GEMINI_MODEL || 'gemini-2.0-flash-exp';
     try {
+<<<<<<< HEAD
+=======
+        console.log(`Initializing Gemini session with model: ${modelName}`);
+        const keyToMask = effectiveApiKey || 'undefined';
+        const maskedKey = keyToMask !== 'undefined' ? `${keyToMask.substring(0, 4)}...${keyToMask.substring(keyToMask.length - 4)}` : 'undefined';
+        console.log('API Key (masked):', maskedKey);
+
+        if (!client.live) {
+            console.error('client.live is undefined. Check @google/genai version.');
+            if (client.aio && client.aio.live) {
+                console.log('Found client.aio.live, using that instead.');
+                // Adjust if necessary, but for now just log it.
+            }
+        }
+
+>>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
         const session = await client.live.connect({
-            model: 'gemini-2.0-flash-exp',
+            model: modelName,
             callbacks: {
                 onopen: function () {
+<<<<<<< HEAD
                     console.log('Gemini Live session connected!');
+=======
+                    console.log('Gemini Live session opened successfully');
+                    console.log('VAD configured: silenceDurationMs=300, EndSensitivity=HIGH');
+>>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
                     sendToRenderer('update-status', 'Live session connected');
                 },
                 onmessage: function (message) {
@@ -283,6 +449,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                     }
 
                     if (message.serverContent?.modelTurn?.parts) {
+<<<<<<< HEAD
                         const parts = message.serverContent.modelTurn.parts;
                         for (const part of parts) {
                             if (part.text) {
@@ -301,6 +468,75 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                                     messageBuffer += text;
                                 }
                                 sendToRenderer(isNewResponse ? 'new-response' : 'update-response', { text: messageBuffer, source: 'gemini' });
+=======
+                        for (const part of message.serverContent.modelTurn.parts) {
+                            if (part.text) {
+                                // Filter out internal monologue/thinking lines
+                                // Split by newlines to handle multi-line chunks correctly
+
+                                // Split by newlines to handle multi-line chunks correctly
+                                const lines = part.text.split('\n');
+                                const cleanedLines = [];
+
+                                // Ultra-comprehensive thinking patterns to catch ALL variations
+                                const thinkingPatterns = [
+                                    // Original patterns
+                                    /^(\*\*|#|##)?\s*(Relating|Connecting|Framing|Assessing|Understanding|Zeroing|Reflecting|Defining|Refining|Crafting|Interpreting|Solidifying|Analyzing|Strategy|Strategies|Strategizing|Thinking|Planning|Formulating|Consolidating|Breaking down|Expanding|Clarifying|Contextualizing|Developing|Delivering|Final|Structuring|Elaborating|Composing|I('ve)? (refined|explored|crafted|drafted|structured|created|finalized|finalise|ready|prepared|broken down|outlined|completed|selected|formatted))/i,
+                                    /^I('m| am) (now|currently|refining|concentrating|tailoring|highlighting|focusing|emphasizing|planning|satisfied|presenting|elaborating|thinking|reflecting|zeroing|connecting|relating|formulating|starting|distilling|crafting|focused)/i,
+                                    /^I (plan to|will|have) (mention|state|explain|highlight|include|outlined|crafted|prepared|completed|selected|verified|generated|removed|ensured|considered|successfully)/i,
+                                    /^My (focus|goal|plan|aim|instruction|latest focus|approach|thoughts|task) (is|are|was|were|expands|now)/i,
+                                    /^Assuming (a|the) (standard|professional|level)/i,
+                                    /^(Key features include|The summary|The response|This response|I'll then|I'll highlight|I've highlighted|I am now incorporating)/i,
+                                    /^(The focus is on|My latest focus)/i,
+                                    // Catch "Generating" at start of line
+                                    /^Generating/i,
+                                    // Catch "My task is" or "My task was"
+                                    /^My task (is|was)/i,
+                                    // Catch "I have generated" or "I have successfully"
+                                    /^I have (generated|successfully|removed|ensured|considered|selected|formatted)/i,
+                                    // Catch any line with "adhering to all instructions" or similar
+                                    /(adhering to|fulfills all|meets all|all requirements|all instructions|all specifications)/i,
+                                    // Catch "making it ready for presentation"
+                                    /(ready for presentation|ready for|making it)/i,
+                                    // Catch "The response is concise" or similar self-assessment
+                                    /^The response (is|was|fulfills|meets)/i,
+                                    // Catch "I considered all the elements"
+                                    /I considered/i,
+                                    // Catch any line starting with "Each bullet point"
+                                    /^Each bullet/i
+                                ];
+
+                                for (const line of lines) {
+                                    let isThinkingLine = false;
+                                    for (const pattern of thinkingPatterns) {
+                                        if (pattern.test(line)) {
+                                            console.log('Stripped thinking line:', line);
+                                            isThinkingLine = true;
+                                            break;
+                                        }
+                                    }
+                                    if (!isThinkingLine) {
+                                        cleanedLines.push(line);
+                                    }
+                                }
+
+                                const cleanedText = cleanedLines.join('\n');
+
+                                if (cleanedText.trim().length === 0) {
+                                    // If the entire chunk was thinking lines, skip it
+                                    continue;
+                                }
+
+                                let timingPrefix = '';
+                                if (messageBuffer === '' && lastRequestTime) {
+                                    const duration = (Date.now() - lastRequestTime) / 1000;
+                                    timingPrefix = `[${duration.toFixed(1)}s] `;
+                                }
+
+                                const fullText = timingPrefix + cleanedText;
+                                messageBuffer += fullText;
+                                sendToRenderer('update-response-stream', fullText);
+>>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
                             }
                         }
                     }
@@ -361,6 +597,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                 },
             },
             config: {
+<<<<<<< HEAD
                 responseModalities: [Modality.TEXT],
                 outputAudioTranscription: {},
                 tools: enabledTools,
@@ -368,6 +605,28 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
                 contextWindowCompression: { slidingWindow: {} },
                 speechConfig: { languageCode: 'en-US', alternativeLanguageCodes: [] },
                 systemInstruction: { parts: [{ text: systemPrompt }] },
+=======
+                realtimeInputConfig: {
+                    automaticActivityDetection: {
+                        disabled: false,
+                        // Shorter silence duration = faster response (300ms instead of default ~1000ms)
+                        startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
+                        endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+                        prefixPaddingMs: 100,
+                        silenceDurationMs: 300,
+                    }
+                },
+                responseModalities: ['AUDIO'],
+                tools: enabledTools,
+                inputAudioTranscription: {}, // Ensure this is enabled for voice
+                speechConfig: {
+                    voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } },
+                    languageCode: language
+                },
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }],
+                },
+>>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
             },
         });
 
@@ -420,9 +679,54 @@ async function startMacOSAudioCapture() {
     await killExistingSystemAudioDump();
     const { app } = require('electron');
     const path = require('path');
+<<<<<<< HEAD
     let systemAudioPath = app.isPackaged ? path.join(process.resourcesPath, 'SystemAudioDump') : path.join(__dirname, '../assets', 'SystemAudioDump');
     systemAudioProc = spawn(systemAudioPath, [], { stdio: ['ignore', 'pipe', 'pipe'] });
     if (!systemAudioProc.pid) return false;
+=======
+
+    let systemAudioPath;
+    if (app.isPackaged) {
+        systemAudioPath = path.join(process.resourcesPath, 'SystemAudioDump');
+    } else {
+        systemAudioPath = path.join(__dirname, '../assets', 'SystemAudioDump');
+    }
+
+    console.log('SystemAudioDump path:', systemAudioPath);
+
+    systemAudioProc = spawn(systemAudioPath, [], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    if (!systemAudioProc.pid) {
+        console.error('Failed to start SystemAudioDump');
+        return false;
+    }
+
+    console.log('SystemAudioDump started with PID:', systemAudioProc.pid);
+
+    // Get audio chunk speed setting (1-4 scale with 0.5 increments)
+    const audioChunkSpeed = await getStoredSetting('audioChunkSpeed', '1');
+    const speedMultiplier = {
+        '1': 0.03,   // 30ms chunks - Fastest (Google recommended)
+        '1.5': 0.05, // 50ms chunks
+        '2': 0.07,   // 70ms chunks
+        '2.5': 0.08, // 80ms chunks
+        '3': 0.1,    // 100ms chunks - Original default
+        '3.5': 0.15, // 150ms chunks
+        '4': 0.27    // 270ms chunks - Slowest
+    };
+    const CHUNK_DURATION = speedMultiplier[audioChunkSpeed] || 0.03;
+    console.log(`Audio chunk speed: ${audioChunkSpeed} (${CHUNK_DURATION * 1000}ms chunks)`);
+
+    const SAMPLE_RATE = 24000;
+    const BYTES_PER_SAMPLE = 2;
+    const CHANNELS = 2;
+    const CHUNK_SIZE = SAMPLE_RATE * BYTES_PER_SAMPLE * CHANNELS * CHUNK_DURATION;
+
+    let audioBuffer = Buffer.alloc(0);
+
+>>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
     systemAudioProc.stdout.on('data', data => {
         if (activeSession) activeSession.sendRealtimeInput({ audio: { data: data.toString('base64'), mimeType: 'audio/pcm;rate=24000' } });
     });
@@ -473,9 +777,21 @@ async function sendImageToGeminiHttp(base64Data, prompt) {
 
 function setupGeminiIpcHandlers(geminiSessionRef) {
     global.geminiSessionRef = geminiSessionRef;
+<<<<<<< HEAD
     ipcMain.handle('initialize-gemini', async (event, apiKey, customPrompt, profile, language) => {
         const result = await initializeGeminiSession(apiKey, customPrompt, profile, language);
         return { success: result.success, error: result.error };
+=======
+
+    ipcMain.handle('initialize-gemini', async (event, profile = 'interview', language = 'en-US', customPrompt = '', resumeContext = '', apiKey = null) => {
+        console.log('IPC initialize-gemini called with:', { profile, language, hasCustomPrompt: !!customPrompt, hasResume: !!resumeContext, hasApiKey: !!apiKey });
+        const session = await initializeGeminiSession(apiKey, customPrompt, resumeContext, profile, language);
+        if (session) {
+            geminiSessionRef.current = session;
+            return true;
+        }
+        return false;
+>>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
     });
     ipcMain.handle('send-audio-content', async (event, { data, mimeType }) => {
         if (!activeSession) {

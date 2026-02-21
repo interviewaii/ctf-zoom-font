@@ -1,9 +1,10 @@
+require('dotenv').config();
 const { GoogleGenAI } = require('@google/genai');
 
 async function testGemini() {
     // TODO: Replace with your own Google Gemini API key
     // Get your API key from: https://ai.google.dev/
-    const apiKey = 'YOUR_GEMINI_API_KEY_HERE';
+    const apiKey = process.env.GEMINI_API_KEY || 'YOUR_GEMINI_API_KEY_HERE';
     const client = new GoogleGenAI({
         vertexai: false,
         apiKey: apiKey,
@@ -13,7 +14,7 @@ async function testGemini() {
 
     try {
         const session = await client.live.connect({
-            model: 'gemini-2.0-flash-exp',
+            model: process.env.GEMINI_MODEL || 'gemini-2.5-flash-native-audio-preview-12-2025',
             callbacks: {
                 onopen: () => {
                     console.log('Session opened!');
