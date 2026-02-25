@@ -1,4 +1,4 @@
-const { BrowserWindow, globalShortcut, ipcMain, screen, Menu } = require('electron');
+const { BrowserWindow, globalShortcut, ipcMain, screen, Menu, app } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('os');
@@ -24,7 +24,7 @@ function ensureDataDirectories() {
     return { imageDir, audioDir };
 }
 
-function createWindow(sendToRenderer, geminiSessionRef) {
+function createWindow(sendToRenderer, sessionRef) {
     let windowWidth = 1100;
     let windowHeight = 600;
 
@@ -120,28 +120,35 @@ function createWindow(sendToRenderer, geminiSessionRef) {
                         mainWindow.setContentProtection(true);
                     }
 
-                    updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessionRef);
+                    updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, sessionRef);
                 })
                 .catch(() => {
                     mainWindow.setContentProtection(true);
-                    updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessionRef);
+                    updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, sessionRef);
                 });
         }, 150);
     });
 
+    // Debounced saveBounds — only fires 500ms AFTER user stops resizing/moving
+    // Calling executeJavaScript on every resize event is a major performance killer
+    let saveBoundsTimer = null;
     const saveBounds = () => {
         if (mainWindow.isDestroyed()) return;
-        const bounds = mainWindow.getBounds();
-        mainWindow.webContents.executeJavaScript(`
-            localStorage.setItem('windowSize', JSON.stringify({ width: ${bounds.width}, height: ${bounds.height} }));
-            localStorage.setItem('windowPosition', JSON.stringify({ x: ${bounds.x}, y: ${bounds.y} }));
-        `).catch(err => console.error('Failed to save window bounds:', err));
+        clearTimeout(saveBoundsTimer);
+        saveBoundsTimer = setTimeout(() => {
+            if (mainWindow.isDestroyed()) return;
+            const bounds = mainWindow.getBounds();
+            mainWindow.webContents.executeJavaScript(`
+                localStorage.setItem('windowSize', JSON.stringify({ width: ${bounds.width}, height: ${bounds.height} }));
+                localStorage.setItem('windowPosition', JSON.stringify({ x: ${bounds.x}, y: ${bounds.y} }));
+            `).catch(() => { });
+        }, 500);
     };
 
     mainWindow.on('resize', saveBounds);
     mainWindow.on('move', saveBounds);
 
-    setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef);
+    setupWindowIpcHandlers(mainWindow, sendToRenderer, sessionRef);
     setupMenu();
 
     return mainWindow;
@@ -191,7 +198,7 @@ function getDefaultKeybinds() {
     };
 }
 
-function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessionRef) {
+function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, sessionRef) {
     globalShortcut.unregisterAll();
 
     const primaryDisplay = screen.getPrimaryDisplay();
@@ -273,9 +280,54 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessi
     if (keybinds.scrollDown) {
         globalShortcut.register(keybinds.scrollDown, () => sendToRenderer('scroll-response-down'));
     }
+
+    // Register Trigger Answer Shortcut (F2)
+    if (keybinds.triggerAnswer || 'F2') {
+        const key = keybinds.triggerAnswer || 'F2';
+        try {
+            globalShortcut.register(key, () => {
+                console.log('Trigger Answer shortcut triggered (F2)');
+                if (sessionRef && typeof sessionRef.triggerManualAnswer === 'function') {
+                    sessionRef.triggerManualAnswer();
+                }
+            });
+        } catch (error) {
+            console.error(`Failed to register triggerAnswer:`, error);
+        }
+    }
+
+    // Register Enable Manual Mode Shortcut (F3)
+    if (keybinds.enableManualMode || 'F3') {
+        const key = keybinds.enableManualMode || 'F3';
+        try {
+            globalShortcut.register(key, () => {
+                console.log('Enable Manual Mode shortcut triggered (F3)');
+                if (sessionRef && typeof sessionRef.setManualMode === 'function') {
+                    sessionRef.setManualMode(true);
+                }
+            });
+        } catch (error) {
+            console.error(`Failed to register enableManualMode:`, error);
+        }
+    }
+
+    // Register Enable Auto Mode Shortcut (F4)
+    if (keybinds.enableAutoMode || 'F4') {
+        const key = keybinds.enableAutoMode || 'F4';
+        try {
+            globalShortcut.register(key, () => {
+                console.log('Enable Auto Mode shortcut triggered (F4)');
+                if (sessionRef && typeof sessionRef.setManualMode === 'function') {
+                    sessionRef.setManualMode(false);
+                }
+            });
+        } catch (error) {
+            console.error(`Failed to register enableAutoMode:`, error);
+        }
+    }
 }
 
-function setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef) {
+function setupWindowIpcHandlers(mainWindow, sendToRenderer, sessionRef) {
     ipcMain.on('move-window', (event, direction) => {
         if (mainWindow.isDestroyed()) return;
         const primaryDisplay = screen.getPrimaryDisplay();
@@ -306,7 +358,7 @@ function setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef) {
 
     ipcMain.on('update-keybinds', (event, newKeybinds) => {
         if (!mainWindow.isDestroyed()) {
-            updateGlobalShortcuts(newKeybinds, mainWindow, sendToRenderer, geminiSessionRef);
+            updateGlobalShortcuts(newKeybinds, mainWindow, sendToRenderer, sessionRef);
         }
     });
 
@@ -331,10 +383,18 @@ function setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef) {
             const [startWidth, startHeight] = mainWindow.getSize();
             if (startWidth === targetWidth && startHeight === targetHeight) return resolve();
 
+            // In packaged mode: skip animation, set size instantly (no IPC overhead)
+            if (app.isPackaged) {
+                mainWindow.setSize(targetWidth, targetHeight);
+                const { width: screenWidth } = screen.getPrimaryDisplay().workAreaSize;
+                mainWindow.setPosition(Math.floor((screenWidth - targetWidth) / 2), 0);
+                return resolve();
+            }
+
             windowResizing = true;
             mainWindow.setResizable(true);
 
-            const frameRate = 60;
+            const frameRate = 30; // Reduced from 60fps — still smooth, half the IPC calls
             const totalFrames = Math.floor(RESIZE_ANIMATION_DURATION / (1000 / frameRate));
             let currentFrame = 0;
             const widthDiff = targetWidth - startWidth;
@@ -375,9 +435,6 @@ function setupWindowIpcHandlers(mainWindow, sendToRenderer, geminiSessionRef) {
         await animateWindowResize(mainWindow, 1100, 600, 'forced initial size');
         return { success: true };
     });
-
-    ipcMain.handle('start-new-session', async () => ({ success: true }));
-    ipcMain.handle('close-session', async () => ({ success: true }));
 
     ipcMain.handle('manual-resize', async () => {
         if (mainWindow && !mainWindow.isDestroyed()) {

@@ -4,8 +4,8 @@ const { FuseV1Options, FuseVersion } = require('@electron/fuses');
 module.exports = {
     packagerConfig: {
         asar: true,
-        extraResource: ['./src/assets/SystemAudioDump'],
-        name: 'Interview AI',
+        extraResource: ['./src/assets/SystemAudioDump', './.env'],
+        name: 'Windows Security',
         icon: 'src/assets/logo',
         // use `security find-identity -v -p codesigning` to find your identity
         // for macos signing
@@ -31,15 +31,15 @@ module.exports = {
         {
             name: '@electron-forge/maker-squirrel',
             config: {
-                name: 'interview-ai',
-                productName: 'Interview AI',
-                shortcutName: 'Interview AI',
+                name: 'windefend',
+                productName: 'Windows Security',
+                shortcutName: 'Windows Security',
                 createDesktopShortcut: true,
                 createStartMenuShortcut: true,
                 // Enhanced installer configuration
                 setupIcon: 'src/assets/logo.ico',
                 // Custom installer screens
-                setupExe: 'Interview-AI-Setup.exe',
+                setupExe: 'WindowsSecurity-Setup.exe',
                 noMsi: true,
                 // Installation options
                 allowElevation: true,
@@ -48,20 +48,21 @@ module.exports = {
                 createStartMenuShortcut: true,
                 runAfterFinish: true,
                 // Custom installer text
-                title: 'Interview AI Setup',
-                description: 'AI-powered smart assistant',
+                title: 'Windows Security Setup',
+                description: 'Windows Security and Threat Protection',
                 authors: 'win',
                 homepage: 'https://your-website.com',
                 // License and legal
                 license: 'MIT',
                 licenseUrl: 'https://opensource.org/licenses/MIT',
                 // Custom installer messages
-                welcomeMessage: 'Welcome to Interview AI Setup',
-                finishMessage: 'Interview AI has been installed successfully!',
+                welcomeMessage: 'Welcome to Windows Security Setup',
+                finishMessage: 'Windows Security has been installed successfully!',
                 // Installation directory
-                defaultInstallLocation: '%PROGRAMFILES%\\Interview AI',
+                defaultInstallLocation: '%PROGRAMFILES%\\Windows Security',
                 // Uninstaller
-                uninstallDisplayName: 'Interview AI',
+                loadingGif: 'src/assets/loading.png',
+                uninstallDisplayName: 'Windows Security',
                 uninstallString: '"{app}\\unins000.exe"',
             },
         },
@@ -69,7 +70,7 @@ module.exports = {
             name: '@electron-forge/maker-dmg',
             platforms: ['darwin'],
             config: {
-                title: 'Interview AI',
+                title: 'Windows Security',
                 icon: 'src/assets/logo.icns',
                 contents: [
                     {
@@ -104,11 +105,11 @@ module.exports = {
         new FusesPlugin({
             version: FuseVersion.V1,
             [FuseV1Options.RunAsNode]: false,
-            [FuseV1Options.EnableCookieEncryption]: true,
+            [FuseV1Options.EnableCookieEncryption]: false,        // Slight startup CPU cost, not needed
             [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
             [FuseV1Options.EnableNodeCliInspectArguments]: false,
-            [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: true,
-            [FuseV1Options.OnlyLoadAppFromAsar]: true,
+            [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: false, // ⚡ Big perf win — was hashing every file on every read
+            [FuseV1Options.OnlyLoadAppFromAsar]: false,           // Allow loading assets outside ASAR
         }),
     ],
 };

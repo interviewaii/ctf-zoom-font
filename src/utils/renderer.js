@@ -7,14 +7,9 @@ let audioContext = null;
 let audioProcessor = null;
 let micAudioProcessor = null;
 let audioBuffer = [];
-const SAMPLE_RATE = 24000;
-<<<<<<< HEAD
-const AUDIO_CHUNK_DURATION = 0.1; // seconds
-const BUFFER_SIZE = 4096; // Increased buffer size for smoother audio
-=======
-let AUDIO_CHUNK_DURATION = 0.1; // Default
-const BUFFER_SIZE = 1024;
->>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
+const SAMPLE_RATE = 16000;
+const BUFFER_SIZE = 4096;
+let AUDIO_CHUNK_DURATION = 0.25; // Default for Whisper
 
 let hiddenVideo = null;
 let offscreenCanvas = null;
@@ -57,8 +52,8 @@ const storage = {
         const key = localStorage.getItem('apiKey');
         if (key) return key;
 
-        // Hardcoded fallback
-        return 'AIzaSyCVeM0WTrPXhyibT1Qy2iAjC0QK4aM5dAY';
+        // Hardcoded fallback removed
+        return '';
     },
     async setApiKey(apiKey) {
         localStorage.setItem('apiKey', apiKey);
@@ -179,48 +174,33 @@ function arrayBufferToBase64(buffer) {
     return btoa(binary);
 }
 
-async function initializeGemini(profile = 'interview', language = 'en-US') {
-<<<<<<< HEAD
-    const prefs = await storage.getPreferences();
-    const apiKey = await storage.getApiKey();
-    console.log('Initializing Gemini with profile:', profile);
-    console.log('Current API Key in renderer:', apiKey ? (apiKey.substring(0, 8) + '...') : 'NONE');
-
-    const result = await ipcRenderer.invoke('initialize-gemini', apiKey, prefs.customPrompt || '', profile, language);
-
-    if (result.success) {
-        console.log('Gemini initialization successful');
-        cheatingDaddy.setStatus('Live');
-=======
+async function initializeGroq(profile = 'interview', language = 'en-US') {
     // Get audio chunk duration from settings
     const audioChunkSpeed = localStorage.getItem('audioChunkSpeed') || '1';
-    const speedMultiplier = {
-        '1': 0.03,   // 30ms
-        '1.5': 0.05, // 50ms
-        '2': 0.07,   // 70ms
-        '2.5': 0.08, // 80ms
-        '3': 0.1,    // 100ms
-        '3.5': 0.15, // 150ms
-        '4': 0.27    // 270ms
-    };
-    AUDIO_CHUNK_DURATION = speedMultiplier[audioChunkSpeed] || 0.03;
     console.log(`Audio chunk duration set to: ${AUDIO_CHUNK_DURATION}s (Speed: ${audioChunkSpeed})`);
 
-    // Pass profile and language first, then customPrompt, resumeContext, and null for apiKey to use rotation
-    const success = await ipcRenderer.invoke('initialize-gemini',
+    // Get API Key and Prompt from storage
+    const apiKey = await storage.getApiKey();
+    const customPrompt = localStorage.getItem('customPrompt') || '';
+    const resumeContext = localStorage.getItem('resumeContext') || '';
+    console.log(`📋 [initializeGroq] Loaded from direct keys - Custom prompt len: ${customPrompt.length}, Resume context len: ${resumeContext.length}`);
+    console.log(`📋 [initializeGroq] Resume context length: ${resumeContext.length}, Custom prompt length: ${customPrompt.length}`);
+
+    // Get silence trigger from settings
+    const silenceTrigger = parseInt(localStorage.getItem('silenceTrigger') || '1500');
+
+    // Pass all settings in a single object
+    const success = await ipcRenderer.invoke('initialize-groq', {
         profile,
         language,
-        localStorage.getItem('customPrompt') || '',
-        localStorage.getItem('resumeContext') || '',
-        null
-    );
+        customPrompt,
+        resumeContext,
+        apiKey,
+        silenceThresholdParam: silenceTrigger
+    });
+
     if (success) {
-        interviewCrackerElement().setStatus('Live');
->>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
-    } else {
-        console.error('Gemini initialization failed:', result.error);
-        cheatingDaddy.setStatus('error');
-        cheatingDaddy.addNewResponse(`Error initializing Gemini: ${result.error}`);
+        cheatingDaddy.setStatus('Live');
     }
 }
 
@@ -230,9 +210,6 @@ ipcRenderer.on('update-status', (event, status) => {
     cheatingDaddy.setStatus(status);
 });
 
-<<<<<<< HEAD
-async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'medium') {
-=======
 // Listen for new response from main process
 ipcRenderer.on('new-response', (event, text) => {
     console.log('📝 [RENDERER] Received new response');
@@ -262,9 +239,11 @@ ipcRenderer.on('scroll-response-down', () => {
 });
 
 async function startCapture(screenshotIntervalSeconds = 2, imageQuality = 'medium') {
->>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
     // Store the image quality for manual screenshots
     currentImageQuality = imageQuality;
+
+    // EXPLICIT START SIGNAL: Reset backend flags
+    ipcRenderer.invoke('start-listening').catch(err => console.error('Error starting listening:', err));
 
     // Refresh preferences cache
     await loadPreferencesCache();
@@ -441,20 +420,19 @@ function setupLinuxMicProcessing(micStream) {
     let audioBuffer = [];
     const samplesPerChunk = SAMPLE_RATE * AUDIO_CHUNK_DURATION;
 
-    micProcessor.onaudioprocess = async e => {
+    micProcessor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
         audioBuffer.push(...inputData);
 
-        // Process audio in chunks
         while (audioBuffer.length >= samplesPerChunk) {
             const chunk = audioBuffer.splice(0, samplesPerChunk);
             const pcmData16 = convertFloat32ToInt16(chunk);
             const base64Data = arrayBufferToBase64(pcmData16.buffer);
-
-            await ipcRenderer.invoke('send-mic-audio-content', {
+            // fire-and-forget — never await inside audio callback
+            ipcRenderer.invoke('send-audio-content', {
                 data: base64Data,
-                mimeType: 'audio/pcm;rate=24000',
-            });
+                mimeType: 'audio/pcm;rate=16000',
+            }).catch(() => { }); // fire-and-forget, don't await
         }
     };
 
@@ -474,20 +452,18 @@ function setupLinuxSystemAudioProcessing() {
     let audioBuffer = [];
     const samplesPerChunk = SAMPLE_RATE * AUDIO_CHUNK_DURATION;
 
-    audioProcessor.onaudioprocess = async e => {
+    audioProcessor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
         audioBuffer.push(...inputData);
 
-        // Process audio in chunks
         while (audioBuffer.length >= samplesPerChunk) {
             const chunk = audioBuffer.splice(0, samplesPerChunk);
             const pcmData16 = convertFloat32ToInt16(chunk);
             const base64Data = arrayBufferToBase64(pcmData16.buffer);
-
-            await ipcRenderer.invoke('send-audio-content', {
+            ipcRenderer.invoke('send-audio-content', {
                 data: base64Data,
-                mimeType: 'audio/pcm;rate=24000',
-            });
+                mimeType: 'audio/pcm;rate=16000',
+            }).catch(() => { });
         }
     };
 
@@ -504,20 +480,18 @@ function setupWindowsLoopbackProcessing() {
     let audioBuffer = [];
     const samplesPerChunk = SAMPLE_RATE * AUDIO_CHUNK_DURATION;
 
-    audioProcessor.onaudioprocess = async e => {
+    audioProcessor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
         audioBuffer.push(...inputData);
 
-        // Process audio in chunks
         while (audioBuffer.length >= samplesPerChunk) {
             const chunk = audioBuffer.splice(0, samplesPerChunk);
             const pcmData16 = convertFloat32ToInt16(chunk);
             const base64Data = arrayBufferToBase64(pcmData16.buffer);
-
-            await ipcRenderer.invoke('send-audio-content', {
+            ipcRenderer.invoke('send-audio-content', {
                 data: base64Data,
-                mimeType: 'audio/pcm;rate=24000',
-            });
+                mimeType: 'audio/pcm;rate=16000',
+            }).catch(() => { });
         }
     };
 
@@ -617,10 +591,15 @@ async function captureScreenshot(imageQuality = 'medium', isManual = false) {
     );
 }
 
-const MANUAL_SCREENSHOT_PROMPT = `Help me on this page, give me the answer no bs, complete answer.
-So if its a code question, give me the approach in few bullet points, then the entire code. Also if theres anything else i need to know, tell me.
-If its a question about the website, give me the answer no bs, complete answer.
-If its a mcq question, give me the answer no bs, complete answer.`;
+const MANUAL_SCREENSHOT_PROMPT = `Look at this screenshot and find the QUESTION or CODING PROBLEM being asked.
+
+**RULES:**
+- If it's a coding question: Provide the COMPLETE code solution in a code block, show the expected OUTPUT in a separate code block, and give a brief explanation.
+- If it's a theory question: Give a direct answer in bullet points.
+- If it's an MCQ: Give the correct answer with brief justification.
+- Do NOT describe the screenshot layout or UI elements.
+- Do NOT say "the image shows..." — just ANSWER the question directly.
+- IGNORE any irrelevant text, browser tabs, or UI noise in the screenshot.`;
 
 async function captureManualScreenshot(imageQuality = null) {
     console.log('Manual screenshot triggered');
@@ -748,6 +727,11 @@ function stopCapture() {
         });
     }
 
+    // IMMEDIATE STOP: Clear all backend buffers and pending processing
+    ipcRenderer.invoke('stop-processing').catch(err => {
+        console.error('Error invoking stop-processing:', err);
+    });
+
     // Clean up hidden elements
     if (hiddenVideo) {
         hiddenVideo.pause();
@@ -758,7 +742,7 @@ function stopCapture() {
     offscreenContext = null;
 }
 
-// Send text message to Gemini
+// Send text message to Groq
 async function sendTextMessage(text) {
     if (!text || text.trim().length === 0) {
         console.warn('Cannot send empty text message');
@@ -830,14 +814,14 @@ async function startAudioListening() {
             // Process audio in chunks
             while (audioBuffer.length >= samplesPerChunk) {
                 const chunk = audioBuffer.splice(0, samplesPerChunk);
-                await sendAudioToGemini(chunk);
+                await sendAudioToGroq(chunk);
             }
         };
 
         micSource.connect(micAudioProcessor);
         // Don't connect to destination to avoid feedback
 
-        console.log('🎤 Microphone is now listening and sending to Gemini');
+        console.log('🎤 Microphone is now listening and sending to Groq');
         return { success: true };
     } catch (error) {
         console.error('❌ Failed to start audio listening:', error);
@@ -846,21 +830,21 @@ async function startAudioListening() {
 }
 
 /**
- * SEND AUDIO TO GEMINI - Sends audio chunks to Gemini
+ * SEND AUDIO TO GROQ - Sends audio chunks to Groq
  */
-async function sendAudioToGemini(audioChunk) {
+async function sendAudioToGroq(audioChunk) {
     try {
         // Convert Float32Array to Int16Array PCM
         const pcmData16 = convertFloat32ToInt16(audioChunk);
         const base64Data = arrayBufferToBase64(pcmData16.buffer);
 
-        // Send to Gemini via IPC invoke (was incorrectly using send)
+        // Send to Groq via IPC invoke
         await ipcRenderer.invoke('send-audio-content', {
             data: base64Data,
             mimeType: 'audio/pcm;rate=24000',
         });
     } catch (error) {
-        console.error('Error sending audio to Gemini:', error);
+        console.error('Error sending audio to Groq:', error);
     }
 }
 
@@ -1243,7 +1227,7 @@ const cheatingDaddy = {
     updateCurrentResponse: response => cheatingDaddyApp.setResponse(response),
 
     // Core functionality
-    initializeGemini,
+    initializeGroq,
     startCapture,
     stopCapture,
     sendTextMessage,
@@ -1252,7 +1236,7 @@ const cheatingDaddy = {
     // NEW AUDIO & RESPONSE FUNCTIONS
     startAudioListening,
     stopAudioListening,
-    sendAudioToGemini,
+    sendAudioToGroq,
     displayNewResponse,
     updateResponseLineByLine,
     copyResponseToClipboard,
@@ -1269,10 +1253,6 @@ const cheatingDaddy = {
     // Platform detection
     isLinux: isLinux,
     isMacOS: isMacOS,
-<<<<<<< HEAD
-=======
-    e: interviewCrackerElement,
-
     // Storage functions for CustomizeView
     storage: {
         async getPreferences() {
@@ -1338,7 +1318,6 @@ const cheatingDaddy = {
             root.style.setProperty('--background-transparent', backgroundColor.replace(/[\d.]+\)$/, `${transparency})`));
         }
     }
->>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
 };
 
 // Make it globally available

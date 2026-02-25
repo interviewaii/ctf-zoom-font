@@ -123,6 +123,29 @@ export class AssistantView extends LitElement {
             margin-left: -12px;
         }
 
+        /* ── Pagination styles ── */
+        .pagination-wrapper {
+            display: flex;
+            flex-direction: column;
+            height: calc(100% - 50px);
+            overflow: hidden;
+        }
+
+        .pagination-response {
+            flex: 1;
+            overflow-y: auto;
+            font-size: var(--response-font-size, 16px);
+            line-height: 1.6;
+            background: var(--bg-primary);
+            padding: 12px 12px 8px 12px;
+            user-select: text;
+            scroll-behavior: smooth;
+        }
+
+        .pagination-response * {
+            user-select: text;
+        }
+
         .text-input-container {
             display: flex;
             gap: 8px;
@@ -253,6 +276,7 @@ export class AssistantView extends LitElement {
         responseFontSize: { type: Number },
         windowShape: { type: String },
         liveTranscription: { type: String },
+        responseStyle: { type: String }, // 'scroll' | 'paginate'
     };
 
     constructor() {
@@ -268,6 +292,7 @@ export class AssistantView extends LitElement {
         this.responseFontSize = parseInt(localStorage.getItem('responseFontSize')) || 16;
         this.windowShape = localStorage.getItem('windowShape') || 'rounded';
         this.liveTranscription = '';
+        this.responseStyle = localStorage.getItem('responseStyle') || 'paginate';
         this._renderedMarkdownCache = new Map();
     }
 
@@ -308,6 +333,10 @@ export class AssistantView extends LitElement {
         const indexChanged = changedProperties.has('currentResponseIndex');
 
         if (responsesChanged || indexChanged) {
+            console.log('📄 [AssistantView] updated() fired. responsesChanged:', responsesChanged, 'indexChanged:', indexChanged);
+            console.log('📄 [AssistantView] currentResponseIndex:', this.currentResponseIndex, 'responses.length:', this.responses.length);
+            console.log('📄 [AssistantView] responseStyle:', this.responseStyle);
+
             const container = this.shadowRoot.querySelector('#responseContainer');
             if (container) {
                 const responseItems = container.querySelectorAll('.response-item[data-response-index]');
@@ -340,8 +369,28 @@ export class AssistantView extends LitElement {
                 }
             }
 
+            // For pagination: update the single response pane
+            const paginationContent = this.shadowRoot.querySelector('.pagination-content');
+            if (paginationContent && this.responseStyle === 'paginate') {
+                const idx = this.currentResponseIndex;
+                console.log('📄 [AssistantView] Pagination render: idx =', idx, 'response exists:', idx >= 0 && idx < this.responses.length);
+                if (idx >= 0 && idx < this.responses.length) {
+                    const responseText = this.responses[idx];
+                    console.log('📄 [AssistantView] Rendering response at index', idx, '- length:', responseText?.length || 0, '- preview:', (responseText || '').substring(0, 80));
+                    paginationContent.innerHTML = this.renderMarkdown(responseText);
+                } else {
+                    console.log('📄 [AssistantView] No response at index', idx, '- clearing content');
+                    paginationContent.innerHTML = '';
+                }
+            } else if (this.responseStyle === 'paginate') {
+                console.log('📄 [AssistantView] WARNING: .pagination-content NOT found in shadow DOM!');
+            }
+
             this.addCopyButtons();
-            this.scrollToBottom();
+            // Only auto-scroll in scroll mode
+            if (this.responseStyle === 'scroll') {
+                this.scrollToBottom();
+            }
         }
     }
 
@@ -414,7 +463,7 @@ export class AssistantView extends LitElement {
             const message = textInput.value.trim();
             textInput.value = '';
 
-            // Actually send the message to Gemini
+            // Actually send the message to Groq
             if (window.cheatingDaddy && window.cheatingDaddy.sendTextMessage) {
                 window.cheatingDaddy.sendTextMessage(message);
             }
@@ -536,27 +585,85 @@ export class AssistantView extends LitElement {
         if (this.windowShape === 'rounded') borderRadius = '24px';
         if (this.windowShape === 'circle') borderRadius = '100px';
 
+        const isPaginate = this.responseStyle === 'paginate';
+        const total = this.responses.length;
+        const idx = this.currentResponseIndex;
+
         return html`
             <style>
                 :host { border-radius: ${borderRadius}; overflow: hidden; }
                 .response-container { border-radius: ${borderRadius} ${borderRadius} 0 0; }
+
+                /* Pagination markdown styles (mirror .response-container markdown) */
+                .pagination-content h1, .pagination-content h2, .pagination-content h3,
+                .pagination-content h4, .pagination-content h5, .pagination-content h6 {
+                    margin: 1em 0 0.5em 0; color: var(--text-color); font-weight: 600;
+                }
+                .pagination-content h1 { font-size: 1.6em; }
+                .pagination-content h2 { font-size: 1.4em; }
+                .pagination-content h3 { font-size: 1.2em; }
+                .pagination-content p { margin: 0.6em 0; color: var(--text-color); }
+                .pagination-content ul, .pagination-content ol { margin: 0.6em 0; padding-left: 1.5em; color: var(--text-color); }
+                .pagination-content li { margin: 0.3em 0; }
+                .pagination-content code {
+                    background: rgba(255,255,255,0.1); padding: 0.2em 0.4em;
+                    border-radius: 6px; font-family: 'SF Mono', Monaco, monospace;
+                    font-size: 0.9em; word-break: break-word;
+                    border: 1px solid rgba(255,255,255,0.05);
+                }
+                .pagination-content pre {
+                    background: var(--bg-secondary); border: 1px solid var(--border-color);
+                    border-radius: 12px; padding: 16px; overflow-x: auto;
+                    margin: 1.2em 0; position: relative;
+                }
+                .pagination-content pre code {
+                    background: none; padding: 0; display: block; white-space: pre-wrap;
+                    word-wrap: break-word; font-size: 0.9em; line-height: 1.5; color: #e0e0e0;
+                }
+                .pagination-response::-webkit-scrollbar { width: 6px; }
+                .pagination-response::-webkit-scrollbar-track { background: rgba(0,0,0,0.05); }
+                .pagination-response::-webkit-scrollbar-thumb {
+                    background: var(--primary-color, #7fbcfa); border-radius: 3px;
+                }
+                .pagination-nav { border-bottom: 1px solid var(--border-color); }
             </style>
-            <div class="response-container" id="responseContainer" style="--response-font-size: ${this.responseFontSize}px">
-                ${this.responses.length === 0 ? html`
-                    <div class="response-item" style="opacity: 0.6; font-style: italic;">${defaultMessage}</div>
-                ` : this.responses.map((response, index) => html`
-                    <div class="red-separator"></div>
-                    <div class="response-item ${index === this.responses.length - 1 ? 'latest' : ''}" data-response-index="${index}">
-                        <div class="markdown-content"></div>
+
+            ${isPaginate ? html`
+                <!-- ═══ PAGINATION MODE ═══ -->
+                <div class="pagination-wrapper" style="height: 100%;">
+                    <div class="pagination-response" style="--response-font-size: ${this.responseFontSize}px">
+                        ${total === 0 ? html`
+                            <div style="opacity:0.6; font-style:italic; color:var(--text-color)">${defaultMessage}</div>
+                        ` : html`
+                            <div class="pagination-content" style="color:var(--text-color)"></div>
+                        `}
+                        ${this.liveTranscription ? html`
+                            <div style="opacity:0.7; font-style:italic; color:var(--accent-color,#7fbcfa); margin-top:10px;">
+                                <span style="font-size:0.8em; text-transform:uppercase; letter-spacing:1px; margin-right:8px;">Listening:</span>
+                                "${this.liveTranscription}"
+                            </div>
+                        ` : ''}
                     </div>
-                `)}
-                ${this.liveTranscription ? html`
-                    <div class="response-item live-transcription" style="opacity: 0.7; font-style: italic; color: var(--accent-color, #7fbcfa); margin-top: 10px;">
-                        <span style="font-size: 0.8em; text-transform: uppercase; letter-spacing: 1px; margin-right: 8px;">Listening:</span>
-                        "${this.liveTranscription}"
-                    </div>
-                ` : ''}
-            </div>
+                </div>
+            ` : html`
+                <!-- ═══ SCROLL MODE ═══ -->
+                <div class="response-container" id="responseContainer" style="--response-font-size: ${this.responseFontSize}px">
+                    ${this.responses.length === 0 ? html`
+                        <div class="response-item" style="opacity: 0.6; font-style: italic;">${defaultMessage}</div>
+                    ` : this.responses.map((response, index) => html`
+                        <div class="red-separator"></div>
+                        <div class="response-item ${index === this.responses.length - 1 ? 'latest' : ''}" data-response-index="${index}">
+                            <div class="markdown-content"></div>
+                        </div>
+                    `)}
+                    ${this.liveTranscription ? html`
+                        <div class="response-item live-transcription" style="opacity: 0.7; font-style: italic; color: var(--accent-color, #7fbcfa); margin-top: 10px;">
+                            <span style="font-size: 0.8em; text-transform: uppercase; letter-spacing: 1px; margin-right: 8px;">Listening:</span>
+                            "${this.liveTranscription}"
+                        </div>
+                    ` : ''}
+                </div>
+            `}
 
             <div class="text-input-container">
                 <button class="shortcut-toggle" @click=${this.toggleShortcuts}>Shortcuts</button>
@@ -571,6 +678,10 @@ export class AssistantView extends LitElement {
                         <li><kbd>Ctrl + \\</kbd>: Toggle Visibility</li>
                         <li><kbd>Ctrl + M</kbd>: Toggle Click-through</li>
                         <li><kbd>Ctrl + Enter</kbd>: Start/Screenshot</li>
+                        ${isPaginate ? html`
+                            <li><kbd>Ctrl + Shift + [</kbd>: Previous Response</li>
+                            <li><kbd>Ctrl + Shift + ]</kbd>: Next Response</li>
+                        ` : ''}
                     </ul>
                 </div>
                 <button class="nav-button" @click=${this.scrollToBottom} title="Scroll to bottom">

@@ -9,7 +9,7 @@ import { OnboardingView } from '../views/OnboardingView.js';
 import { AdvancedView } from '../views/AdvancedView.js';
 import { PaymentAlert } from '../views/PaymentAlert.js';
 import { isActivationValid, activateWithDeviceLock } from '../../utils/deviceId.js';
-import { isLicenseValid, activateLicense, canStartInterview, canGetResponse, trackInterviewStart, trackResponse, getLicenseInfo } from '../../utils/licenseManager.js';
+import { isLicenseValid, activateLicense, canStartInterview, canGetResponse, trackInterviewStart, trackResponse, getLicenseInfo, checkLicenseBanStatus } from '../../utils/licenseManager.js';
 
 export class InterviewCrackerApp extends LitElement {
     static styles = css`
@@ -47,12 +47,9 @@ export class InterviewCrackerApp extends LitElement {
                 0 8px 32px rgba(0, 0, 0, 0.2),
                 inset 0 1px 0 rgba(255, 255, 255, 0.1);
             background: var(--background-transparent) !important;
-            backdrop-filter: blur(var(--glass-blur, 8px));
-            -webkit-backdrop-filter: blur(var(--glass-blur, 8px));
+            /* backdrop-filter removed — extremely expensive GPU op, causes high CPU */
             border: 1.5px solid var(--card-border);
-            animation: windowAppear 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94);
             position: relative;
-            transition: all 0.3s ease-in-out;
         }
 
         .window-container::before {
@@ -89,16 +86,13 @@ export class InterviewCrackerApp extends LitElement {
             overflow: hidden;
             margin-top: var(--main-content-margin-top);
             border-radius: var(--content-border-radius);
-            transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
             background: var(--main-content-background) !important;
-            backdrop-filter: blur(var(--glass-blur, 8px));
-            -webkit-backdrop-filter: blur(var(--glass-blur, 8px));
+            /* backdrop-filter removed — two blur layers = constant GPU compositing */
             box-shadow: 
                 0 8px 32px var(--shadow-color, rgba(31, 38, 135, 0.15)),
                 inset 0 1px 0 rgba(255, 255, 255, 0.1);
             border: 1.5px solid var(--card-border);
-            animation: slideInUp 0.6s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-            /* Hide scrollbar in non-WebKit as well */
+            /* entry animation removed — re-runs on every view change, causes repaints */
             -ms-overflow-style: none;
             scrollbar-width: none;
         }
@@ -132,27 +126,12 @@ export class InterviewCrackerApp extends LitElement {
         .view-container {
             opacity: 1;
             transform: translateY(0);
-            transition:
-                opacity 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-                transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
             height: 100%;
-            animation: fadeInScale 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            /* transition removed — runs on every view switch, causes layout thrash */
         }
 
         .view-container.entering {
             opacity: 0;
-            transform: translateY(20px) scale(0.98);
-        }
-
-        @keyframes fadeInScale {
-            from {
-                opacity: 0;
-                transform: scale(0.95);
-            }
-            to {
-                opacity: 1;
-                transform: scale(1);
-            }
         }
 
         ::-webkit-scrollbar {
@@ -198,6 +177,8 @@ export class InterviewCrackerApp extends LitElement {
         uiZoomLevel: { type: Number },
         isTranscribing: { type: Boolean },
         pttText: { type: String },
+        responseStyle: { type: String }, // 'scroll' | 'paginate'
+        activationSuccess: { type: Object }, // { tierName, isUpgrade, previousTier } or null
     };
 
     constructor() {
@@ -216,6 +197,7 @@ export class InterviewCrackerApp extends LitElement {
         this.layoutMode = localStorage.getItem('layoutMode') || 'normal';
         this.advancedMode = localStorage.getItem('advancedMode') === 'true';
         this.isDarkMode = localStorage.getItem('isDarkMode') !== 'false'; // Default to dark mode
+        this.responseStyle = localStorage.getItem('responseStyle') || 'paginate'; // default: pagination
         this.responses = [];
         this.currentResponseIndex = -1;
         this.isListening = false;
@@ -228,6 +210,7 @@ export class InterviewCrackerApp extends LitElement {
         this._inCodeBlock = false;
         this.isTranscribing = false;
         this.pttText = '';
+        this.activationSuccess = null;
 
         // Zoom controls
         this.responseFontSize = parseInt(localStorage.getItem('responseFontSize') || '18');
@@ -280,6 +263,31 @@ export class InterviewCrackerApp extends LitElement {
         // Load latest session history
         this.loadLatestSession();
 
+        // ── PERIODIC LICENSE BAN CHECK (every 2 minutes) ──
+        this._banCheckInterval = setInterval(async () => {
+            const result = await checkLicenseBanStatus();
+            if (result.banned) {
+                console.warn('🚫 License has been banned by admin!');
+                this.isActivated = false;
+                this.showPaymentAlert = true;
+
+                // Stop listening if active
+                if (this.isListening) {
+                    try { await this.handleToggleListening(); } catch (e) { }
+                }
+                this.currentView = 'main';
+                this.requestUpdate();
+
+                // Show ban message in the payment alert
+                await this.updateComplete;
+                const paymentAlert = this.shadowRoot?.querySelector('payment-alert');
+                if (paymentAlert) {
+                    paymentAlert.errorMessage = result.message || '🚫 Your license has been banned by the administrator.';
+                    paymentAlert.requestUpdate();
+                }
+            }
+        }, 2 * 60 * 1000); // Check every 2 minutes
+
         // Set up IPC listeners if needed
         if (window.require) {
             const { ipcRenderer } = window.require('electron');
@@ -330,6 +338,30 @@ export class InterviewCrackerApp extends LitElement {
                     return false;
                 }
 
+                // ── Pagination navigation: Ctrl + Shift + [ (previous) / ] (next) ──
+                // Use e.code (BracketLeft/Right) for reliable physical key detection regardless of Shift
+                if (isCtrl && isShift && (e.key === '[' || e.key === '{' || e.code === 'BracketLeft')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (this.responseStyle === 'paginate' && this.currentResponseIndex > 0) {
+                        this.currentResponseIndex--;
+                        this.requestUpdate();
+                        console.log('📖 Pagination ← previous response:', this.currentResponseIndex);
+                    }
+                    return false;
+                }
+
+                if (isCtrl && isShift && (e.key === ']' || e.key === '}' || e.code === 'BracketRight')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (this.responseStyle === 'paginate' && this.currentResponseIndex < this.responses.length - 1) {
+                        this.currentResponseIndex++;
+                        this.requestUpdate();
+                        console.log('📖 Pagination → next response:', this.currentResponseIndex);
+                    }
+                    return false;
+                }
+
                 // Handle Shift+Plus/Minus for response font size
                 if (isShift && !isCtrl && (e.key === '+' || e.key === '=' || e.key === '-' || e.key === '_')) {
                     e.preventDefault();
@@ -377,6 +409,9 @@ export class InterviewCrackerApp extends LitElement {
 
     disconnectedCallback() {
         super.disconnectedCallback();
+        if (this._banCheckInterval) {
+            clearInterval(this._banCheckInterval);
+        }
         if (window.require) {
             const { ipcRenderer } = window.require('electron');
             ipcRenderer.removeAllListeners('update-response');
@@ -496,6 +531,7 @@ export class InterviewCrackerApp extends LitElement {
     }
 
     setResponse(text, isUpdate = false) {
+
         // Clear any pending stream updates to prevent race conditions
         if (this._streamThrottleTimeout) {
             clearTimeout(this._streamThrottleTimeout);
@@ -503,10 +539,22 @@ export class InterviewCrackerApp extends LitElement {
         }
         this._streamBuffer = '';
 
+        // KEY FIX: If isUpdate=true but we are NOT currently streaming, it means
+        // the backend sent a brand-new completed response (groq.js always sends
+        // 'update-response'). Treat it as a NEW response, not an update.
+        if (isUpdate && !this.isStreaming && this.responses.length > 0) {
+            // Check if the text is substantially different from the last response
+            const lastResponse = this.responses[this.responses.length - 1] || '';
+            if (lastResponse && text !== lastResponse && lastResponse.length > 10) {
+                console.log('📦 [setResponse] Detected NEW response via update-response (not streaming). Pushing as new entry.');
+                isUpdate = false; // Force it to be treated as a new response
+            }
+        }
+
         if (isUpdate && this.responses.length > 0) {
-            // Update the last response
+            // Update the last response (only during active streaming)
             this.responses[this.responses.length - 1] = text;
-            this.responses = [...this.responses]; // Force update
+            this.responses = [...this.responses];
         } else {
             // Only check license limits if user is already activated
             if (this.isActivated) {
@@ -519,9 +567,8 @@ export class InterviewCrackerApp extends LitElement {
             }
 
             this.responses.push(text);
-            this.responses = [...this.responses]; // Force update for child components
+            this.responses = [...this.responses];
 
-            // Track response for license limits (only if activated)
             if (this.isActivated) {
                 trackResponse();
             }
@@ -539,6 +586,7 @@ export class InterviewCrackerApp extends LitElement {
             // If user is viewing the latest response (or no responses yet), auto-navigate to new response
             if (this.currentResponseIndex === this.responses.length - 2 || this.currentResponseIndex === -1) {
                 this.currentResponseIndex = this.responses.length - 1;
+                console.log('📦 [setResponse] AUTO-NAVIGATE to index:', this.currentResponseIndex);
             }
         }
 
@@ -546,7 +594,6 @@ export class InterviewCrackerApp extends LitElement {
         this.isStreaming = false;
         this._inCodeBlock = false;
 
-        // Hide loading indicator when response is received
         if (window.setScreenshotProcessing) {
             window.setScreenshotProcessing(false);
         }
@@ -736,14 +783,15 @@ export class InterviewCrackerApp extends LitElement {
 
     // Main view event handlers
     async handleStart() {
-        // Enforce license check - No free trial allowed
-        if (!this.isActivated) {
+        // ── LICENSE GATE ──
+        // Check if license is valid before starting an interview
+        if (!isLicenseValid()) {
+            this.isActivated = false;
             this.showPaymentAlert = true;
             this.requestUpdate();
             return;
         }
 
-        // Check license limits
         const interviewCheck = canStartInterview();
         if (!interviewCheck.allowed) {
             alert(interviewCheck.reason);
@@ -751,15 +799,13 @@ export class InterviewCrackerApp extends LitElement {
         }
 
         if (window.interviewAI) {
-            await window.interviewAI.initializeGemini(this.selectedProfile, this.selectedLanguage);
+            await window.interviewAI.initializeGroq(this.selectedProfile, this.selectedLanguage);
             // Pass the screenshot interval as string (including 'manual' option)
             window.interviewAI.startCapture(this.selectedScreenshotInterval, this.selectedImageQuality);
         }
 
-        // Track interview start for license limits (only if activated)
-        if (this.isActivated) {
-            trackInterviewStart();
-        }
+        // Track interview start for license limits
+        trackInterviewStart();
 
         this.responses = [];
         this.currentResponseIndex = -1;
@@ -777,7 +823,7 @@ export class InterviewCrackerApp extends LitElement {
     async handleAPIKeyHelp() {
         if (window.require) {
             const { ipcRenderer } = window.require('electron');
-            await ipcRenderer.invoke('open-external', 'https://ai.google.dev/');
+            await ipcRenderer.invoke('open-external', 'https://console.groq.com/keys');
         }
     }
 
@@ -802,6 +848,12 @@ export class InterviewCrackerApp extends LitElement {
     handleAdvancedModeChange(advancedMode) {
         this.advancedMode = advancedMode;
         localStorage.setItem('advancedMode', advancedMode.toString());
+    }
+
+    handleResponseStyleChange(style) {
+        this.responseStyle = style;
+        localStorage.setItem('responseStyle', style);
+        this.requestUpdate();
     }
 
     handleBackClick() {
@@ -848,9 +900,9 @@ export class InterviewCrackerApp extends LitElement {
             return;
         }
 
-        // Initialize Gemini if needed
+        // Initialize Groq session
         if (window.interviewAI) {
-            await window.interviewAI.initializeGemini(this.selectedProfile, this.selectedLanguage);
+            await window.interviewAI.initializeGroq(this.selectedProfile, this.selectedLanguage);
         }
 
         this.currentView = 'assistant';
@@ -913,6 +965,9 @@ export class InterviewCrackerApp extends LitElement {
         if (changedProperties.has('isDarkMode')) {
             localStorage.setItem('isDarkMode', this.isDarkMode.toString());
         }
+        if (changedProperties.has('responseStyle')) {
+            localStorage.setItem('responseStyle', this.responseStyle);
+        }
 
         // Apply UI zoom after render
         if (changedProperties.has('uiZoomLevel')) {
@@ -948,12 +1003,14 @@ export class InterviewCrackerApp extends LitElement {
                         .selectedImageQuality=${this.selectedImageQuality}
                         .layoutMode=${this.layoutMode}
                         .advancedMode=${this.advancedMode}
+                        .responseStyle=${this.responseStyle}
                         .onProfileChange=${profile => this.handleProfileChange(profile)}
                         .onLanguageChange=${language => this.handleLanguageChange(language)}
                         .onScreenshotIntervalChange=${interval => this.handleScreenshotIntervalChange(interval)}
                         .onImageQualityChange=${quality => this.handleImageQualityChange(quality)}
                         .onLayoutModeChange=${layoutMode => this.handleLayoutModeChange(layoutMode)}
                         .onAdvancedModeChange=${advancedMode => this.handleAdvancedModeChange(advancedMode)}
+                        .onResponseStyleChange=${style => this.handleResponseStyleChange(style)}
                     ></customize-view>
                 `;
 
@@ -974,6 +1031,7 @@ export class InterviewCrackerApp extends LitElement {
                         .selectedProfile=${this.selectedProfile}
                         .isStreaming=${this.isStreaming}
                         .responseFontSize=${this.responseFontSize}
+                        .responseStyle=${this.responseStyle}
                         .onSendText=${message => this.handleSendText(message)}
                         @response-index-changed=${this.handleResponseIndexChanged}
                         @adjust-zoom=${(e) => this.adjustUIZoom(e.detail.delta)}
@@ -1008,6 +1066,25 @@ export class InterviewCrackerApp extends LitElement {
                         .advancedMode=${this.advancedMode}
                         .isListening=${this.isListening}
                         .isDarkMode=${this.isDarkMode}
+                        .responseStyle=${this.responseStyle}
+                        .totalResponses=${this.responses.length}
+                        .currentResponseIndex=${this.currentResponseIndex}
+                        .onNavigatePrevious=${() => {
+                console.log('📖 Header Prev clicked. Current index:', this.currentResponseIndex, 'Total:', this.responses.length);
+                if (this.currentResponseIndex > 0) {
+                    this.currentResponseIndex--;
+                    this.requestUpdate();
+                    console.log('📖 Navigated to:', this.currentResponseIndex);
+                }
+            }}
+                        .onNavigateNext=${() => {
+                console.log('📖 Header Next clicked. Current index:', this.currentResponseIndex, 'Total:', this.responses.length);
+                if (this.currentResponseIndex < this.responses.length - 1) {
+                    this.currentResponseIndex++;
+                    this.requestUpdate();
+                    console.log('📖 Navigated to:', this.currentResponseIndex);
+                }
+            }}
                         .onCustomizeClick=${() => this.handleCustomizeClick()}
                         .onHelpClick=${() => this.handleHelpClick()}
                         .onHistoryClick=${() => this.handleHistoryClick()}
@@ -1033,6 +1110,83 @@ export class InterviewCrackerApp extends LitElement {
                             .onPayNow=${() => this.handlePayNow()}
                         ></payment-alert>
                     </div>
+                ` : ''}
+                ${this.activationSuccess ? html`
+                    <div style="
+                        position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+                        z-index: 20000;
+                        display: flex; align-items: center; justify-content: center;
+                        background: rgba(0,0,0,0.6);
+                        backdrop-filter: blur(10px);
+                        animation: fadeIn 0.3s ease;
+                    ">
+                        <div style="
+                            background: linear-gradient(135deg, rgba(10,20,40,0.98) 0%, rgba(5,15,30,0.99) 100%);
+                            border: 2px solid rgba(0,220,130,0.6);
+                            border-radius: 20px;
+                            padding: 36px 40px;
+                            text-align: center;
+                            max-width: 380px;
+                            width: 90%;
+                            box-shadow: 0 0 60px rgba(0,220,130,0.35), 0 20px 60px rgba(0,0,0,0.8);
+                            animation: popIn 0.4s cubic-bezier(0.34,1.56,0.64,1);
+                        ">
+                            <div style="font-size: 56px; margin-bottom: 12px;">✅</div>
+                            <div style="font-size: 22px; font-weight: 700; color: #fff; margin-bottom: 6px;">
+                                ${this.activationSuccess.isUpgrade ? 'Plan Upgraded!' : 'License Activated!'}
+                            </div>
+                            <div style="
+                                display: inline-block;
+                                background: linear-gradient(135deg, #00dc82, #00c8ff);
+                                -webkit-background-clip: text;
+                                -webkit-text-fill-color: transparent;
+                                font-size: 28px; font-weight: 800; margin: 10px 0;
+                            ">${this.activationSuccess.tierName}</div>
+                            ${this.activationSuccess.isUpgrade ? html`
+                                <div style="color:rgba(255,255,255,0.6); font-size:13px; margin-bottom:8px;">
+                                    Upgraded from ${this.activationSuccess.previousTier}
+                                </div>
+                            ` : ''}
+                            <div style="color: rgba(0,220,130,0.85); font-size: 13px; margin-top: 16px;">
+                                🎉 Your plan is now active. Start your interview!
+                            </div>
+                            <div style="margin-top: 20px;">
+                                <div style="
+                                    width: 100%; height: 4px;
+                                    background: rgba(255,255,255,0.1);
+                                    border-radius: 2px; overflow: hidden;
+                                ">
+                                    <div style="
+                                        height: 100%;
+                                        background: linear-gradient(90deg, #00dc82, #00c8ff);
+                                        border-radius: 2px;
+                                        animation: shrinkBar 4s linear forwards;
+                                    "></div>
+                                </div>
+                                <div style="color:rgba(255,255,255,0.4); font-size:11px; margin-top:6px;">Closing automatically…</div>
+                            </div>
+                            <button @click=${() => { this.activationSuccess = null; this.requestUpdate(); }} style="
+                                margin-top: 16px;
+                                background: rgba(255,255,255,0.08);
+                                border: 1px solid rgba(255,255,255,0.15);
+                                color: rgba(255,255,255,0.7);
+                                padding: 8px 24px;
+                                border-radius: 10px;
+                                font-size: 13px;
+                                cursor: pointer;
+                            ">Close</button>
+                        </div>
+                    </div>
+                    <style>
+                        @keyframes popIn {
+                            from { opacity: 0; transform: scale(0.85) translateY(20px); }
+                            to   { opacity: 1; transform: scale(1) translateY(0); }
+                        }
+                        @keyframes shrinkBar {
+                            from { width: 100%; }
+                            to   { width: 0%; }
+                        }
+                    </style>
                 ` : ''}
             </div>
         `;
@@ -1152,35 +1306,28 @@ export class InterviewCrackerApp extends LitElement {
                 this.isActivated = true;
                 this.showPaymentAlert = false;
 
-                // Switch to chat view and show welcome message
-                this.currentView = 'assistant';
-                this.responses = [{
-                    text: "🎉 License activated successfully! How can I help you today?",
-                    sender: 'ai',
-                    timestamp: new Date().toLocaleTimeString()
-                }];
-                this.currentResponseIndex = 0;
-
-                // Initialize Gemini if needed
-                if (window.interviewAI) {
-                    await window.interviewAI.initializeGemini(this.selectedProfile, this.selectedLanguage);
-                }
-
+                // Show the in-app success popup with plan details
+                this.activationSuccess = {
+                    tierName: licenseResult.tier || 'License',
+                    isUpgrade: licenseResult.isUpgrade || false,
+                    previousTier: licenseResult.previousTier || '',
+                    deviceId: licenseResult.deviceId || ''
+                };
                 this.requestUpdate();
 
-                // Show upgrade message if applicable
-                if (licenseResult.isUpgrade) {
-                    alert(`✓ License upgraded successfully!\n\nPrevious: ${licenseResult.previousTier}\nNew: ${licenseResult.tier}\n\nYour new plan is now active!`);
-                } else {
-                    alert(`✓ License activated successfully!\n\nPlan: ${licenseResult.tier}\nDevice ID: ${licenseResult.deviceId}`);
-                }
+                // Auto-close success popup after 4 seconds then go to main view
+                setTimeout(() => {
+                    this.activationSuccess = null;
+                    this.requestUpdate();
+                }, 4000);
+
                 console.log('License activated:', licenseResult.tier);
                 return;
             } else {
                 // Show error message in the payment alert
                 const paymentAlert = this.shadowRoot.querySelector('payment-alert');
                 if (paymentAlert) {
-                    paymentAlert.errorMessage = licenseResult.reason || 'Invalid activation code. Please try again.';
+                    paymentAlert.errorMessage = licenseResult.error || licenseResult.reason || 'Invalid activation code. Please try again.';
                     paymentAlert.successMessage = '';
                     paymentAlert.requestUpdate();
                 }

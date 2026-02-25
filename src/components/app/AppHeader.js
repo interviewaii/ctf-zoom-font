@@ -1,4 +1,5 @@
 import { html, css, LitElement } from '../../assets/lit-core-2.7.4.min.js';
+import { getSynchronizedTime } from '../../utils/licenseManager.js';
 
 export class AppHeader extends LitElement {
     static styles = css`
@@ -207,6 +208,94 @@ export class AppHeader extends LitElement {
         .theme-toggle:active svg {
             transform: scale(0.95);
         }
+
+        /* ── Header Pagination styles ── */
+        .header-pagination {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-right: 12px;
+            -webkit-app-region: no-drag;
+            pointer-events: all;
+        }
+
+        .header-pagination-btn {
+            background: var(--button-background);
+            color: var(--text-color);
+            border: 1.5px solid var(--button-border);
+            padding: 4px 10px !important;
+            border-radius: 12px !important;
+            font-size: 11px !important;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            transition: all 0.2s ease;
+            cursor: pointer;
+            -webkit-app-region: no-drag;
+            pointer-events: all;
+        }
+
+        .header-pagination-btn:hover:not(:disabled) {
+            background: var(--button-hover-background);
+            border-color: var(--primary-color, #7fbcfa);
+            color: var(--primary-color, #7fbcfa);
+            transform: translateY(-1px);
+        }
+
+        .header-pagination-btn:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+
+        .header-pagination-indicator {
+            font-size: 11px;
+            color: var(--text-secondary);
+            background: var(--button-background);
+            padding: 4px 10px;
+            border-radius: 12px;
+            border: 1px solid var(--button-border);
+            font-weight: 600;
+            -webkit-app-region: no-drag;
+            pointer-events: all;
+        }
+
+        .header-pagination-indicator .current-num {
+            color: var(--primary-color, #7fbcfa);
+        }
+
+        /* License time badge */
+        .license-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 12px;
+            border: 1px solid;
+            -webkit-app-region: no-drag;
+        }
+        .license-badge.ok {
+            background: rgba(34, 197, 94, 0.10);
+            border-color: rgba(34, 197, 94, 0.4);
+            color: #4ade80;
+        }
+        .license-badge.warning {
+            background: rgba(251, 191, 36, 0.12);
+            border-color: rgba(251, 191, 36, 0.4);
+            color: #fbbf24;
+        }
+        .license-badge.urgent {
+            background: rgba(239, 68, 68, 0.12);
+            border-color: rgba(239, 68, 68, 0.4);
+            color: #f87171;
+            animation: urgentPulse 1s infinite;
+        }
+        @keyframes urgentPulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
     `;
 
     static properties = {
@@ -229,6 +318,11 @@ export class AppHeader extends LitElement {
         isScreenShareVisible: { type: Boolean },
         isDarkMode: { type: Boolean },
         onToggleTheme: { type: Function },
+        responseStyle: { type: String },
+        currentResponseIndex: { type: Number },
+        totalResponses: { type: Number },
+        onNavigatePrevious: { type: Function },
+        onNavigateNext: { type: Function },
     };
 
     constructor() {
@@ -252,17 +346,28 @@ export class AppHeader extends LitElement {
         this.isScreenShareVisible = false;
         this.isDarkMode = localStorage.getItem('isDarkMode') !== 'false'; // Default to dark mode
         this.onToggleTheme = () => { };
+        this.responseStyle = 'scroll';
+        this.currentResponseIndex = -1;
+        this.totalResponses = 0;
+        this.onNavigatePrevious = () => { };
+        this.onNavigateNext = () => { };
         this._timerInterval = null;
     }
 
     connectedCallback() {
         super.connectedCallback();
+        // Always start the update interval so license badge refreshes every second
+        this._licenseInterval = setInterval(() => this.requestUpdate(), 1000);
         this._startTimer();
     }
 
     disconnectedCallback() {
         super.disconnectedCallback();
         this._stopTimer();
+        if (this._licenseInterval) {
+            clearInterval(this._licenseInterval);
+            this._licenseInterval = null;
+        }
     }
 
     updated(changedProperties) {
@@ -333,6 +438,42 @@ export class AppHeader extends LitElement {
         return '';
     }
 
+    getLicenseTimeRemaining() {
+        try {
+            const nowTs = getSynchronizedTime();
+            const now = new Date(nowTs);
+
+            const tierCode = localStorage.getItem('licenseTier');
+            const activatedDate = localStorage.getItem('licenseActivatedDate');
+            if (!tierCode || !activatedDate) return null;
+
+            // HOURLY plan — show live countdown in minutes only
+            const expiryTs = parseInt(localStorage.getItem('licenseExpiryTimestamp') || '0');
+            if ((tierCode === 'HR01' || tierCode === 'HR02') && expiryTs) {
+                const msLeft = expiryTs - nowTs;
+                if (msLeft <= 0) return { label: 'Expired', cls: 'urgent' };
+                const mins = Math.ceil(msLeft / (1000 * 60));
+                const cls = mins < 10 ? 'urgent' : mins < 30 ? 'warning' : 'ok';
+                return { label: `⏱ ${mins}m left`, cls };
+            }
+
+            // DAY-BASED plan — show days remaining
+            const durations = { 'DALY': 1, 'WEEK': 7, 'MNTH': 30 };
+            const days = durations[tierCode];
+            if (days) {
+                const activated = new Date(activatedDate);
+                const expiryDate = new Date(activated);
+                expiryDate.setDate(expiryDate.getDate() + days);
+                expiryDate.setHours(23, 59, 59, 999);
+                const daysLeft = Math.ceil((expiryDate - now) / (1000 * 60 * 60 * 24));
+                if (daysLeft <= 0) return { label: 'Expired', cls: 'urgent' };
+                const cls = daysLeft <= 1 ? 'urgent' : daysLeft <= 3 ? 'warning' : 'ok';
+                return { label: `🗓 ${daysLeft}d left`, cls };
+            }
+        } catch (e) { /* ignore */ }
+        return null;
+    }
+
     isNavigationView() {
         const navigationViews = ['customize', 'help', 'history', 'advanced'];
         return navigationViews.includes(this.currentView);
@@ -348,17 +489,43 @@ export class AppHeader extends LitElement {
 
     render() {
         const elapsedTime = this.getElapsedTime();
+        const licenseInfo = this.getLicenseTimeRemaining();
 
         return html`
             <div class="header">
-                <!-- Removed Log in, Buy Now, and Test Alert buttons -->
                 <div class="header-nav">
                 </div>
                 <div class="header-title">${this.getViewTitle()}</div>
                 <div class="header-actions">
+                    ${licenseInfo ? html`
+                        <span class="license-badge ${licenseInfo.cls}">${licenseInfo.label}</span>
+                    ` : ''}
                     ${this.currentView === 'assistant'
                 ? html`
                               <span>${elapsedTime}</span>
+
+                              ${this.responseStyle === 'paginate' ? html`
+                                <div class="header-pagination">
+                                    <button class="header-pagination-btn" ?disabled=${this.currentResponseIndex <= 0}
+                                        @click=${this.onNavigatePrevious} title="Previous Response">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                            <polyline points="15 18 9 12 15 6"/>
+                                        </svg>
+                                        Prev
+                                    </button>
+                                    <div class="header-pagination-indicator">
+                                        <span class="current-num">${this.currentResponseIndex + 1}</span> / ${this.totalResponses}
+                                    </div>
+                                    <button class="header-pagination-btn" ?disabled=${this.currentResponseIndex >= this.totalResponses - 1}
+                                        @click=${this.onNavigateNext} title="Next Response">
+                                        Next
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                            <polyline points="9 18 15 12 9 6"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                              ` : ''}
+
                               <button class="listening-toggle" @click=${this.onToggleListening} ?data-listening=${this.isListening}>
                                   ${this.isListening ? 'Stop' : 'Start'} Listening
                               </button>
@@ -376,6 +543,11 @@ export class AppHeader extends LitElement {
                 : ''}
                     ${this.currentView === 'main'
                 ? html`
+                              <button class="screen-share-toggle-btn" @click=${this.toggleScreenShareVisibility.bind(this)} title="${this.isScreenShareVisible ? 'Hide from screen share' : 'Reveal on screen share'}">
+                                ${this.isScreenShareVisible
+                        ? html`<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="11" cy="11" rx="7" ry="4.5"/><circle cx="11" cy="11" r="2.2"/></svg> Reveal`
+                        : html`<svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="11" cy="11" rx="7" ry="4.5"/><path d="M4 4l14 14"/></svg> Reveal`}
+                              </button>
                               <button class="icon-button" @click=${this.onHistoryClick} title="History">
                                 <svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                                   <rect x="3.5" y="4.5" width="15" height="13" rx="2.5"/>

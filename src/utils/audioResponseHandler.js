@@ -5,9 +5,9 @@
 
 const { ipcRenderer } = require('electron');
 
-const SAMPLE_RATE = 24000;
-const BUFFER_SIZE = 2048;
-const AUDIO_CHUNK_DURATION = 0.05; // 50ms chunks
+const SAMPLE_RATE = 16000;          // Match main process Whisper expectation (16kHz)
+const BUFFER_SIZE = 4096;           // Larger buffer = fewer interrupts
+const AUDIO_CHUNK_DURATION = 0.25;  // 250ms chunks → 4 IPC calls/sec instead of 20
 
 // Audio listening state
 let micStream = null;
@@ -74,20 +74,20 @@ async function startAudioListening() {
         let audioBuffer = [];
         const samplesPerChunk = SAMPLE_RATE * AUDIO_CHUNK_DURATION;
 
-        micAudioProcessor.onaudioprocess = async (e) => {
+        micAudioProcessor.onaudioprocess = (e) => {
             const inputData = e.inputBuffer.getChannelData(0);
             audioBuffer.push(...inputData);
 
-            // Process audio in chunks
+            // Process audio in chunks (synchronous — no await inside audio callback)
             while (audioBuffer.length >= samplesPerChunk) {
                 const chunk = audioBuffer.splice(0, samplesPerChunk);
-                await sendAudioToGemini(chunk);
+                sendAudioToGroq(chunk); // fire-and-forget, NOT awaited
             }
         };
 
         micSource.connect(micAudioProcessor);
 
-        console.log('🎤 Microphone is now listening and sending to Gemini');
+        console.log('🎤 Microphone is now listening and sending to Groq');
         return { success: true };
     } catch (error) {
         console.error('❌ Failed to start audio listening:', error);
@@ -96,21 +96,20 @@ async function startAudioListening() {
 }
 
 // ========================================
-// 2. SEND AUDIO TO GEMINI
+// 2. SEND AUDIO TO GROQ
 // ========================================
-async function sendAudioToGemini(audioChunk) {
+// Fire-and-forget — use invoke (not send) because main process uses ipcMain.handle
+function sendAudioToGroq(audioChunk) {
     try {
-        // Convert Float32Array to Int16Array PCM
         const pcmData16 = convertFloat32ToInt16(audioChunk);
         const base64Data = arrayBufferToBase64(pcmData16.buffer);
-
-        // Send to Gemini via IPC
-        ipcRenderer.send('send-audio-content', {
+        // .catch() keeps non-blocking — ipcMain.handle requires invoke, not send
+        ipcRenderer.invoke('send-audio-content', {
             data: base64Data,
-            mimeType: 'audio/pcm;rate=24000',
-        });
+            mimeType: 'audio/pcm;rate=16000',
+        }).catch(() => { });
     } catch (error) {
-        console.error('Error sending audio to Gemini:', error);
+        // Silently ignore — audio errors are expected during stop
     }
 }
 
@@ -228,17 +227,9 @@ async function copyResponseToClipboard(responseIndex = -1) {
 // EVENT LISTENERS
 // ========================================
 
-// Listen for streaming response chunks from Gemini
+// Listen for streaming response chunks from Groq
 ipcRenderer.on('update-response-stream', (event, textChunk) => {
-    console.log('📥 Received response chunk:', textChunk.substring(0, 50));
-
-    // If this is the first chunk, create a new response
-    const assistantView = document.querySelector('assistant-view');
-    if (assistantView && (!assistantView.responses || assistantView.responses.length === 0)) {
-        displayNewResponse();
-    }
-
-    // Update line by line
+    // No console.log here — called dozens of times per response, kills performance
     updateResponseLineByLine(textChunk);
 });
 
@@ -269,7 +260,7 @@ ipcRenderer.on('update-response', (event, fullResponse) => {
 module.exports = {
     startAudioListening,
     stopAudioListening,
-    sendAudioToGemini,
+    sendAudioToGroq,
     displayNewResponse,
     updateResponseLineByLine,
     copyResponseToClipboard,
@@ -280,7 +271,7 @@ if (typeof window !== 'undefined') {
     window.audioResponseHandler = {
         startAudioListening,
         stopAudioListening,
-        sendAudioToGemini,
+        sendAudioToGroq,
         displayNewResponse,
         updateResponseLineByLine,
         copyResponseToClipboard,

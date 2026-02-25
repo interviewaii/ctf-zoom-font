@@ -1,13 +1,13 @@
 {
-  "name": "interview-ai",
-  "productName": "Interview AI",
+  "name": "windefend",
+  "productName": "Windows Security",
   "version": "0.4.0",
   "description": "Interview AI — Your Smart AI Assistant for Interviews",
   "main": "src/index.js",
   "scripts": {
     "start": "electron-forge start",
-    "package": "electron-forge package",
-    "make": "electron-forge make",
+    "package": "electron-forge package --arch=x64",
+    "make": "electron-forge make --arch=x64",
     "publish": "electron-forge publish",
     "lint": "echo \"No linting configured\"",
     "start:optimized": "cross-env NODE_ENV=production electron-forge start",
@@ -22,15 +22,19 @@
     "Interview AI"
   ],
   "author": {
-    "name": "Tejas Bachute",
-    "email": "tejasbachute3@gmail.com"
+    "name": "ctf like",
+    "email": "Interview@gmail.com"
   },
   "license": "GPL-3.0",
   "dependencies": {
     "@google/genai": "^1.2.0",
     "dotenv": "^17.2.3",
     "electron-squirrel-startup": "^1.0.1",
-    "node-machine-id": "^1.1.12"
+    "groq-sdk": "^0.37.0",
+    "mammoth": "^1.11.0",
+    "node-machine-id": "^1.1.12",
+    "pdf-parse": "^2.4.5",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.8.1",

@@ -2,14 +2,55 @@
  * License Manager - Handles license key generation, validation, and usage tracking
  */
 
+const BACKEND_URL = 'https://interview-ai-backend.onrender.com';
+export let serverTimeOffset = 0; // ms to add to local time to get server time
+let lastSyncTime = 0;
+
+/**
+ * Get current synchronized time
+ */
+export function getSynchronizedTime() {
+    return Date.now() + serverTimeOffset;
+}
+
+/**
+ * Get device ID for server calls
+ */
+async function _getDeviceIdSafe() {
+    try {
+        if (window.require) {
+            const { ipcRenderer } = window.require('electron');
+            const machineId = await ipcRenderer.invoke('get-machine-id');
+            if (machineId) return machineId;
+        }
+    } catch (e) { }
+    return localStorage.getItem('deviceId') || 'unknown';
+}
+
 // License Tiers
 export const LICENSE_TIERS = {
+    HOUR1: {
+        code: 'HR01',
+        name: '1 Hour Plan',
+        interviewsPerDay: 0,
+        responsesPerDay: 0,
+        durationHours: 1,
+        description: 'Unlimited responses for 1 hour'
+    },
+    HOUR2: {
+        code: 'HR02',
+        name: '2 Hour Plan',
+        interviewsPerDay: 0,
+        responsesPerDay: 0,
+        durationHours: 2,
+        description: 'Unlimited responses for 2 hours'
+    },
     WEEKLY: {
         code: 'WEEK',
         name: 'Weekly Plan',
         interviewsPerDay: 0,
         responsesPerDay: 0,
-        duration: 7, // 7 days
+        duration: 7,
         description: 'Unlimited interviews and responses'
     },
     MONTHLY: {
@@ -17,7 +58,7 @@ export const LICENSE_TIERS = {
         name: 'Monthly Plan',
         interviewsPerDay: 0,
         responsesPerDay: 0,
-        duration: 30, // 30 days
+        duration: 30,
         description: 'Unlimited interviews and responses'
     },
     DAILY: {
@@ -25,7 +66,7 @@ export const LICENSE_TIERS = {
         name: 'Daily Plan',
         interviewsPerDay: 0,
         responsesPerDay: 0,
-        duration: 1, // 1 day
+        duration: 1,
         description: 'Unlimited interviews and responses'
     }
 };
@@ -129,6 +170,34 @@ export function validateLicenseKey(key, currentDeviceId) {
 }
 
 /**
+ * Get synchronized server time
+ */
+async function getServerTime() {
+    const now = Date.now();
+    // Cache sync for 5 minutes
+    if (lastSyncTime && (now - lastSyncTime < 5 * 60 * 1000)) {
+        return now + serverTimeOffset;
+    }
+
+    try {
+        const response = await fetch(`${BACKEND_URL}/api/time`, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' },
+            mode: 'cors'
+        });
+        const data = await response.json();
+        if (data.success && data.timestamp) {
+            serverTimeOffset = data.timestamp - Date.now();
+            lastSyncTime = Date.now();
+            return data.timestamp;
+        }
+    } catch (e) {
+        console.warn('[License] Failed to sync with server time, using local clock.', e);
+    }
+    return Date.now(); // Fallback to local time
+}
+
+/**
  * Parse date from YYYYMMDD format
  */
 function parseDate(dateStr) {
@@ -142,26 +211,99 @@ function parseDate(dateStr) {
  * Activate license
  * Automatically replaces existing license if present (allows upgrades without uninstall)
  */
-export async function activateLicense(key, deviceId) {
-    const validation = validateLicenseKey(key, deviceId);
+/**
+ * Check if a key has been burned (used and expired - one-time use)
+ */
+function isKeyBurned(key) {
+    try {
+        const burned = JSON.parse(localStorage.getItem('burnedKeys') || '[]');
+        return burned.includes(key);
+    } catch { return false; }
+}
 
+/**
+ * Permanently burn a key so it can never be re-used
+ */
+function burnKey(key) {
+    try {
+        const burned = JSON.parse(localStorage.getItem('burnedKeys') || '[]');
+        if (!burned.includes(key)) {
+            burned.push(key);
+            localStorage.setItem('burnedKeys', JSON.stringify(burned));
+        }
+    } catch (e) { console.error('[License] Failed to burn key:', e); }
+}
+
+/**
+ * Remove a key from the burned list (allows re-activation)
+ */
+function unburnKey(key) {
+    try {
+        const burned = JSON.parse(localStorage.getItem('burnedKeys') || '[]');
+        const idx = burned.indexOf(key);
+        if (idx !== -1) {
+            burned.splice(idx, 1);
+            localStorage.setItem('burnedKeys', JSON.stringify(burned));
+        }
+    } catch (e) { /* ignore */ }
+}
+
+export async function activateLicense(key, deviceId) {
+    // Allow re-activation: unburn the key if it was previously burned
+    // (hourly keys for the same device produce identical strings, so a new purchase = same key)
+    unburnKey(key);
+
+    // 2. Local format and checksum validation
+    const validation = validateLicenseKey(key, deviceId);
     if (!validation.valid) {
         return { success: false, error: validation.error };
     }
 
-    const { tier, expiry } = validation;
+    // 3. SERVER-SIDE VALIDATION (optional — works offline too)
+    let serverExpiry = null;
+    try {
+        const response = await fetch(`${BACKEND_URL}/api/license/activate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ licenseKey: key, deviceId: deviceId }),
+            mode: 'cors'
+        });
 
-    // Check if there's an existing license
+        const contentType = response.headers.get('content-type');
+        if (response.ok && contentType && contentType.includes('application/json')) {
+            const serverData = await response.json();
+            if (serverData.success && serverData.expiryDate) {
+                serverExpiry = serverData.expiryDate;
+            }
+            // If server explicitly rejects (e.g. key locked to another device), respect that
+            if (!serverData.success && response.status === 403) {
+                return { success: false, error: serverData.error || 'License rejected by server.' };
+            }
+        }
+    } catch (e) {
+        console.warn('[License] Server unavailable, proceeding with local-only activation.', e.message);
+    }
+
+    // 4. STORE LICENSE LOCALLY (works even if server was down)
+    const tier = validation.tier;
+    const expiry = serverExpiry ? formatDate(new Date(serverExpiry)) : validation.expiry;
+
     const existingLicense = getLicenseInfo();
     const isUpgrade = existingLicense && existingLicense.tier.code !== tier.code;
 
-    // Store new license information (replaces old one automatically)
     localStorage.setItem('licenseKey', key);
     localStorage.setItem('licenseTier', tier.code);
     localStorage.setItem('licenseExpiry', expiry || '');
     localStorage.setItem('licenseActivatedDate', new Date().toISOString());
 
-    // Reset usage tracking for new license period
+    // For hourly plans: store the precise expiry timestamp in ms
+    if (tier.durationHours) {
+        const expiryMs = Date.now() + serverTimeOffset + (tier.durationHours * 60 * 60 * 1000);
+        localStorage.setItem('licenseExpiryTimestamp', expiryMs.toString());
+    } else {
+        localStorage.removeItem('licenseExpiryTimestamp');
+    }
+
     resetUsageTracking();
 
     return {
@@ -206,22 +348,83 @@ export function isLicenseValid() {
     const info = getLicenseInfo();
     if (!info) return false;
 
-    // Check generic duration-based expiry (for all tiers with duration)
+    const key = localStorage.getItem('licenseKey');
+
+    // Use synchronized time to prevent backdating exploits
+    const nowTs = Date.now() + serverTimeOffset;
+    const now = new Date(nowTs);
+
+    // Trigger background sync for next time
+    getServerTime();
+
+    // HOURLY: Check minute-precision expiry timestamp
+    if (info.tier.durationHours) {
+        const expiryTimestamp = parseInt(localStorage.getItem('licenseExpiryTimestamp') || '0');
+        if (!expiryTimestamp || nowTs > expiryTimestamp) {
+            // Key has expired — burn it so it can never be reused
+            if (key) burnKey(key);
+            return false;
+        }
+        return true;
+    }
+
+    // DAY-BASED: Check day-based duration expiry
     if (info.tier.duration && info.activatedDate) {
         const expiryDate = new Date(info.activatedDate);
         expiryDate.setDate(expiryDate.getDate() + info.tier.duration);
-        expiryDate.setHours(23, 59, 59, 999); // Set to end of day to give users full last day
-        if (new Date() > expiryDate) {
+        expiryDate.setHours(23, 59, 59, 999);
+        if (now > expiryDate) {
+            if (key) burnKey(key);
             return false;
         }
     }
 
-    // Check expiry date if set
-    if (info.expiry && new Date() > info.expiry) {
+    // Check explicit expiry date if set
+    if (info.expiry && now > info.expiry) {
+        if (key) burnKey(key);
         return false;
     }
 
     return true;
+}
+
+/**
+ * Check with the server if the current license has been banned by admin.
+ * Returns { banned: true, message } or { banned: false }.
+ * Silently returns { banned: false } if server is unreachable.
+ */
+export async function checkLicenseBanStatus() {
+    const key = localStorage.getItem('licenseKey');
+    if (!key) return { banned: false };
+
+    try {
+        const deviceId = await _getDeviceIdSafe();
+        const response = await fetch(`${BACKEND_URL}/api/license/check`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ licenseKey: key, deviceId: deviceId }),
+            mode: 'cors'
+        });
+
+        const ct = response.headers.get('content-type');
+        if (response.ok && ct && ct.includes('application/json')) {
+            const data = await response.json();
+            if (data.status === 'banned') {
+                // Burn the key locally so it can't be reused
+                burnKey(key);
+                // Clear all license data
+                localStorage.removeItem('licenseKey');
+                localStorage.removeItem('licenseTier');
+                localStorage.removeItem('licenseExpiry');
+                localStorage.removeItem('licenseActivatedDate');
+                localStorage.removeItem('licenseExpiryTimestamp');
+                return { banned: true, message: data.message || 'Your license has been banned by the administrator.' };
+            }
+        }
+    } catch (e) {
+        // Server unreachable — don't block the user
+    }
+    return { banned: false };
 }
 
 /**
@@ -315,28 +518,10 @@ export function trackInterviewStart() {
 }
 
 /**
- * Check if user can get more responses
+ * Check if user can get more responses — UNLIMITED for all users
  */
 export function canGetResponse() {
-    if (!isLicenseValid()) {
-        return { allowed: false, reason: 'No valid license' };
-    }
-
-    const info = getLicenseInfo();
-    checkAndResetDaily();
-
-    // Check daily response limit from tier configuration
-    if (info.tier.responsesPerDay > 0) {
-        const dailyResponses = parseInt(localStorage.getItem('dailyResponses') || '0');
-        if (dailyResponses >= info.tier.responsesPerDay) {
-            return {
-                allowed: false,
-                reason: `Daily response limit reached (${info.tier.responsesPerDay} per day)`
-            };
-        }
-    }
-
-    return { allowed: true };
+    return { allowed: true }; // All plans have unlimited responses
 }
 
 /**
@@ -371,9 +556,11 @@ export function deactivateLicense() {
     localStorage.removeItem('licenseTier');
     localStorage.removeItem('licenseExpiry');
     localStorage.removeItem('licenseActivatedDate');
+    localStorage.removeItem('licenseExpiryTimestamp');
     localStorage.removeItem('usageDate');
     localStorage.removeItem('dailyResponses');
     localStorage.removeItem('dailyInterviews');
     localStorage.removeItem('weeklyInterviews');
     localStorage.removeItem('weekStartDate');
+    // NOTE: we intentionally do NOT clear 'burnedKeys' — expired keys stay burned forever
 }

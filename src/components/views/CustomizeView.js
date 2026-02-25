@@ -573,20 +573,19 @@ export class CustomizeView extends LitElement {
         selectedLanguage: { type: String },
         selectedImageQuality: { type: String },
         layoutMode: { type: String },
+        responseStyle: { type: String },
         keybinds: { type: Object },
         googleSearchEnabled: { type: Boolean },
         backgroundTransparency: { type: Number },
         fontSize: { type: Number },
         theme: { type: String },
-<<<<<<< HEAD
         currentRPM: { type: Number },
-=======
         resumeContext: { type: String },
->>>>>>> c6c2f3a2df78b66535485f66507fb0c30929bc2a
         onProfileChange: { type: Function },
         onLanguageChange: { type: Function },
         onImageQualityChange: { type: Function },
         onLayoutModeChange: { type: Function },
+        onResponseStyleChange: { type: Function },
         activeSection: { type: String },
         audioChunkSpeed: { type: String },
         responseSpeed: { type: String },
@@ -644,13 +643,15 @@ export class CustomizeView extends LitElement {
         this.showShortcuts = false;
         this.currentRPM = 0;
         this.rpmTimer = null;
+        this.responseStyle = localStorage.getItem('responseStyle') || 'paginate';
+        this.onResponseStyleChange = () => { };
 
         this._loadFromStorage();
 
         // Speed settings defaults
         this.safetyTimeout = parseFloat(localStorage.getItem('safetyTimeout') || '5');
         this.followUpDelay = parseFloat(localStorage.getItem('followUpDelay') || '0');
-        this.silenceTrigger = parseInt(localStorage.getItem('silenceTrigger') || '400');
+        this.silenceTrigger = parseInt(localStorage.getItem('silenceTrigger') || '1500');
     }
 
     toggleShortcuts() {
@@ -883,6 +884,13 @@ export class CustomizeView extends LitElement {
     handleLayoutModeSelect(e) {
         this.layoutMode = e.target.value;
         this.onLayoutModeChange(e.target.value);
+    }
+
+    handleResponseStyleChange(style) {
+        this.responseStyle = style;
+        localStorage.setItem('responseStyle', style);
+        if (this.onResponseStyleChange) this.onResponseStyleChange(style);
+        this.requestUpdate();
     }
 
     async handleCustomPromptInput(e) {
@@ -1354,6 +1362,36 @@ export class CustomizeView extends LitElement {
                 </div>
 
                 <div class="form-group">
+                    <label class="form-label">Response Display Style</label>
+                    <div style="display:flex; gap:8px; margin-top:4px;">
+                        <button
+                            style="flex:1; padding:8px 6px; border-radius:5px; font-size:11px; font-weight:600;
+                                   border: 1.5px solid ${this.responseStyle === 'paginate' ? 'var(--primary-color, #7fbcfa)' : 'var(--border-color)'};
+                                   background: ${this.responseStyle === 'paginate' ? 'rgba(127,188,250,0.12)' : 'var(--bg-secondary)'};
+                                   color: ${this.responseStyle === 'paginate' ? 'var(--primary-color, #7fbcfa)' : 'var(--text-color)'};
+                                   transition: all 0.15s ease; cursor:pointer;"
+                            @click=${() => this.handleResponseStyleChange('paginate')}>
+                            📄 Pagination
+                        </button>
+                        <button
+                            style="flex:1; padding:8px 6px; border-radius:5px; font-size:11px; font-weight:600;
+                                   border: 1.5px solid ${this.responseStyle === 'scroll' ? 'var(--primary-color, #7fbcfa)' : 'var(--border-color)'};
+                                   background: ${this.responseStyle === 'scroll' ? 'rgba(127,188,250,0.12)' : 'var(--bg-secondary)'};
+                                   color: ${this.responseStyle === 'scroll' ? 'var(--primary-color, #7fbcfa)' : 'var(--text-color)'};
+                                   transition: all 0.15s ease; cursor:pointer;"
+                            @click=${() => this.handleResponseStyleChange('scroll')}>
+                            🔄 Scrolling
+                        </button>
+                    </div>
+                    <div class="form-description" style="margin-top:6px;">
+                        ${this.responseStyle === 'paginate'
+                ? '📄 One response at a time. Use Ctrl+Shift + [ and ] or Prev/Next buttons to navigate.'
+                : '🔄 All responses stack. New response auto-scrolls into view.'
+            }
+                    </div>
+                </div>
+
+                <div class="form-group">
                     <div class="slider-container">
                         <div class="slider-header">
                             <label class="form-label">Background Transparency</label>
@@ -1598,10 +1636,11 @@ export class CustomizeView extends LitElement {
                         <div class="form-description">
                             How long to wait for silence before the AI starts responding.
                             <br/><br/>
-                            <strong>📊 Recommended Settings by Speaking Speed:</strong><br/>
-                            • <strong>Fast speakers:</strong> 400-500ms<br/>
-                            • <strong>Normal speakers:</strong> 600-800ms<br/>
-                            • <strong>Slow/thoughtful speakers:</strong> 900-1200ms
+                            <strong>📊 Recommended Settings:</strong><br/>
+                            • <strong>Default (recommended):</strong> 1500ms<br/>
+                            • <strong>Fast speakers:</strong> 800-1000ms<br/>
+                            • <strong>Normal pace:</strong> 1200-1500ms<br/>
+                            • <strong>Slow/thoughtful:</strong> 1500-2000ms
                         </div>
                     </div>
                 </div>
@@ -1667,7 +1706,7 @@ export class CustomizeView extends LitElement {
                         </div>
                         <div style="font-size: 11px; line-height: 1.5; color: var(--text-color);">
                             ${isCritical
-                    ? 'The API limit is almost exhausted. Please add or switch to a new API key in gemini.js to avoid service interruption.'
+                    ? 'The API limit is almost exhausted. Please add or switch to a new API key in groq.js or Groq settings to avoid service interruption.'
                     : 'Usage is high. If more people join, you may need to provide an additional API key.'}
                         </div>
                     </div>
